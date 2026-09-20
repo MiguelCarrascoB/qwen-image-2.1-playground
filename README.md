@@ -20,10 +20,14 @@ Local image generation with [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Imag
 1. Install + download weights (~11 GB):
    - **macOS:** `./scripts/setup_mac.sh` — full guide: [docs/MACOS.md](docs/MACOS.md)
    - **Windows 11 + RX 7900 XTX:** official ComfyUI Desktop or portable (AMD ROCm auto-selected) — full guide: [docs/WINDOWS_AMD.md](docs/WINDOWS_AMD.md)
-2. Start ComfyUI on port 8188 with CORS enabled (macOS:
+2. Start ComfyUI on port 8188 with CORS scoped to the UI origin (macOS:
    `./scripts/start_comfyui_mac.sh`; Windows:
-   `python main.py --port 8188 --use-pytorch-cross-attention --enable-cors-header`).
-   The UI is served from a different origin, so `--enable-cors-header` is required.
+   `python main.py --port 8188 --use-pytorch-cross-attention --enable-cors-header http://127.0.0.1:8080`).
+   The UI is served from a different origin, so CORS is required — pass the exact
+   origin you serve the UI from (`http://127.0.0.1:8080` by default; use `:8137`
+   if you start the server with `--port 8137`). A bare `--enable-cors-header`
+   answers `Access-Control-Allow-Origin: *`, which lets any website you visit read
+   ComfyUI's files (including uploaded inputs).
 3. Serve `app/` over http and open it, e.g. `python scripts/serve_app.py`,
    then browse to `http://127.0.0.1:8080`. The server sends
    `Cache-Control: no-store`, so HTML, CSS and ES modules are always fresh (no
@@ -40,8 +44,8 @@ Local image generation with [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Imag
 > 512×512, 8 steps in ~18.1 s cold including ~14 s of one-time model loading
 > (~0.6 s/step steady-state), no errors. Full details:
 > [docs/WINDOWS_AMD.md](docs/WINDOWS_AMD.md). As noted above, the UI runs from a
-> different origin, so `--enable-cors-header` is required on the ComfyUI command
-> line.
+> different origin, so CORS is required on the ComfyUI command line — scope it
+> with `--enable-cors-header http://127.0.0.1:8080`.
 
 ## Playground UI
 
@@ -49,6 +53,13 @@ Local image generation with [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Imag
 
 Dependency-free (vanilla HTML/CSS/ES modules), dark theme, responsive:
 
+- Two modes: **Text → Image** and **Edit image**
+- **Image edit**: drag & drop / click-to-browse / Ctrl·⌘+V paste one or more
+  reference images, an edit instruction, and the same size / steps / CFG / seed /
+  advanced controls. References upload to ComfyUI (`POST /upload/image`) and feed
+  `TextEncodeQwenImage21` via its autogrow `images` inputs (the node's own
+  `latent` output seeds the sampler); results keep the mode + references in their
+  metadata so **Apply / Re-run** restores the edit.
 - Live **server panel**: GPU name, free/total VRAM, ComfyUI + PyTorch version
 - Prompt + collapsible negative prompt; size presets or custom W/H; steps, CFG,
   seed with lock and randomize
@@ -61,6 +72,14 @@ Dependency-free (vanilla HTML/CSS/ES modules), dark theme, responsive:
 - Reconciles with the live queue on reload: flags a job still running on the GPU
   (with a stop button) and recovers its result
 - Accessible: ARIA live regions, focus-visible rings, `prefers-reduced-motion`
+
+### Image editing
+
+![Image editing](docs/images/playground_ui_edit.png)
+
+Upload a reference (drag & drop, click, or paste), describe the change, and the
+edit follows the instruction. The example turns a red apple green —
+512×512, 8 steps, 16.2 s on the RX 7900 XTX.
 
 ## Which quant fits your machine
 
@@ -80,6 +99,7 @@ All runs use euler / simple / cfg 1.0 (FLUX-style), negative prompt empty.
 | 2 | (graph validation render, not archived) | an orange cat sitting on a yellow bookshelf | 512×512 | 8 | M4 Pro, 48 GB | MPS, GGUF Q4_K_M | 42 | ~56 s |
 | 3 | ![Bookshop cafe](docs/images/qwen21_demo_00001_.png) | cozy bookshop cafe…chalkboard reads "QWEN IMAGE 2.1" | 1024×1024 | 40 | M4 Pro, 48 GB | MPS, GGUF Q4_K_M | 7 | ~550 s (≈13.5 s/step) |
 | 4 | ![RX 7900 XTX smoke](docs/images/qwen21_7900xtx_512_8steps.png) | a red apple on a wooden table, studio light | 512×512 | 8 | RX 7900 XTX, 24 GB | ROCm 7.2.1, GGUF Q4_K_M | 42 | ~18.1 s (incl. ~14 s first model load; ~0.6 s/step steady-state) |
+| 5 | ![Edit red to green apple](docs/images/qwen21_edit_7900xtx_512_8steps.png) | **edit** — "Change the apple to bright green, keep shape and background" (reference: red apple) | 512×512 | 8 | RX 7900 XTX, 24 GB | ROCm 7.2.1, GGUF Q4_K_M | 42 | ~16.2 s warm (image upload + reference latents) |
 
 Main output, full size:
 
@@ -94,5 +114,6 @@ Qwen-Image-2.1 is released under the **Qwen Research License** — non-commercia
 ## Security notes
 
 - ComfyUI listens only on `127.0.0.1:8188`; slots are looked up via the app's `POST /prompt`/`/interrupt` rather than trusting the client UI.
-- The UI is served from a different origin, so ComfyUI must be started with `--enable-cors-header`. Keep it bound to `127.0.0.1` so the open CORS policy is never reachable from the network.
-- The web UI is fully offline: no external assets; never uses `innerHTML`/eval for server- or user-derived data; a strict CSP meta policy restricts `connect-src`/`img-src` to localhost:8188; `fetch`/`WS` requests use `AbortController` with reconnection backoff.
+- The UI is served from a different origin, so ComfyUI must be started with CORS **scoped to that origin** — `--enable-cors-header http://127.0.0.1:8080` — not the bare flag, which answers `Access-Control-Allow-Origin: *` and lets any website you visit read ComfyUI's files (including uploaded inputs) and queue jobs. Keep ComfyUI bound to `127.0.0.1`.
+- **Uploads:** raster images only (PNG/JPEG/WebP/GIF/BMP), ≤20 MB each, validated client-side. Each upload is renamed to a random `qwen21_ref_<id>.<ext>` (never the user's filename) and sent with `overwrite=false`, so it cannot clobber an existing input file or traverse paths. Previews use `blob:` object URLs / ComfyUI's `/view` in an `<img>` only — never `iframe`/`object`/HTML.
+- The web UI is fully offline: no external assets; never uses `innerHTML`/eval for server- or user-derived data; a strict CSP meta policy restricts `connect-src`/`img-src` to localhost:8188 (`+ blob:`/`data:` for local previews) and sets `object-src 'none'`/`base-uri 'self'`; `fetch`/`WS` requests use `AbortController` with reconnection backoff.

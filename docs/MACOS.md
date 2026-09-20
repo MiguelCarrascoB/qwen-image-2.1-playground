@@ -46,7 +46,7 @@ python3.13 -m venv ComfyUI/.venv
 ComfyUI/.venv/bin/pip install --upgrade torch -r ComfyUI/requirements.txt -r ComfyUI/custom_nodes/ComfyUI-GGUF/requirements.txt
 ComfyUI/.venv/bin/hf download Abiray/Qwen-Image-2.1-GGUF qwen_image_2.1_Q4_K_M.gguf --local-dir ComfyUI/models/unet
 # + text encoder and VAE as listed above
-ComfyUI/.venv/bin/python ComfyUI/main.py --port 8188
+ComfyUI/.venv/bin/python ComfyUI/main.py --port 8188 --enable-cors-header http://127.0.0.1:8080
 ```
 
 ## Choosing a quant (24 vs 48 GB Macs)

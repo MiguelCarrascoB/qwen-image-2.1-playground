@@ -7,13 +7,14 @@
  * inserted via textContent or attribute values only.
  * ========================================================================== */
 
-import { CONFIG, STORAGE_KEY } from "./config.js?v=3";
+import { CONFIG, STORAGE_KEY } from "./config.js?v=4";
 import {
   conn, onConnectionChange, checkConnection, reconnectNow, onWsMessage,
-  buildGraph, submitPrompt, interrupt, cancelQueued, fetchHistoryImages,
+  buildGraph, buildEditGraph, submitPrompt, uploadImage, imageRef,
+  interrupt, cancelQueued, fetchHistoryImages,
   fetchSystemStats, fetchQueue, viewUrl, previewUrl,
   downloadImage, serverBase,
-} from "./api.js?v=3";
+} from "./api.js?v=4";
 
 const $ = (id) => document.getElementById(id);
 
@@ -34,18 +35,20 @@ function loadSettings() {
 function saveSettings() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      prompt:     $("prompt").value,
-      negPrompt:  $("negPrompt").value,
-      width:      $("width").value,
-      height:     $("height").value,
-      steps:      $("steps").value,
-      cfg:        $("cfg").value,
-      seed:       $("seed").value,
-      seedLocked: $("lockSeed").classList.contains("active"),
-      sampler:    $("sampler").value,
-      scheduler:  $("scheduler").value,
-      denoise:    $("denoise").value,
-      batch:      $("batch").value,
+      mode:            state.mode,
+      prompt:          $("prompt").value,
+      editInstruction: $("editInstruction").value,
+      negPrompt:       $("negPrompt").value,
+      width:           $("width").value,
+      height:          $("height").value,
+      steps:           $("steps").value,
+      cfg:             $("cfg").value,
+      seed:            $("seed").value,
+      seedLocked:      $("lockSeed").classList.contains("active"),
+      sampler:         $("sampler").value,
+      scheduler:       $("scheduler").value,
+      denoise:         $("denoise").value,
+      batch:           $("batch").value,
     }));
   } catch { /* private mode / quota — non-fatal */ }
 }
@@ -55,10 +58,12 @@ function saveSettings() {
  * ========================================================================== */
 
 const state = {
+  mode: "t2i", // "t2i" | "edit"
   generating: false,
   currentPromptId: null,
   startTime: 0,
   elapsedTimer: null,
+  cancelTimer: null, // cancel watchdog; cleared so it can't hit the next job
   maxSteps: 1,
   stepValue: 0,
   nodeEventCount: 0,
@@ -67,12 +72,17 @@ const state = {
   watchdogTimer: null,
   queuePollTimer: null,
   statsPollTimer: null,
+  queueFetchInFlight: false,
+  firstProbeDone: false, // suppress the "not reachable" banner before the first probe
   lastParams: null, // parameters actually submitted for the in-flight job
   ownPromptIds: new Set(), // jobs this page submitted (never treated as foreign)
   recoveredIds: new Set(), // foreign jobs already pulled into the gallery
   busyPromptId: null, // foreign job currently running on the server
-  gallery: [], // { filename, subfolder, type, prompt, seed, steps, width, height, elapsed, ts }
+  gallery: [], // { filename, subfolder, type, mode, prompt, instruction, seed, steps, width, height, elapsed, ts }
   selected: null,
+  editImages: [], // { id, name, previewUrl, status, server, image, progress }
+  editSeq: 0,
+  focusOnCancel: false, // focus was parked on Cancel when the controls were disabled
 };
 
 /* ============================================================================
@@ -135,7 +145,10 @@ function renderStatus(connected, extra) {
   pill.title = (connected ? "Connected to ComfyUI at " : "ComfyUI unreachable at ") +
     where + (extra ? " · " + extra : "") + " — click to retry";
   $("setupBanner").classList.toggle("visible", !connected);
-  $("generateBtn").disabled = state.generating || !connected;
+  announce(connected
+    ? "Connected to ComfyUI"
+    : "ComfyUI unreachable" + (extra ? ": " + extra : ""));
+  updateGenerateButton();
   if (connected) {
     refreshServerInfo();
     startQueuePoll();
@@ -145,6 +158,15 @@ function renderStatus(connected, extra) {
     clearServerBusy();
     renderServerInfo(null);
   }
+}
+
+/** Generate is blocked while disconnected, mid-run, or (in edit mode) until at
+ * least one reference image is uploaded and an instruction is present. */
+function updateGenerateButton() {
+  const edit = state.mode === "edit";
+  const hasRef = state.editImages.some((it) => it.status === "ready");
+  const missing = edit && (!hasRef || !$("editInstruction").value.trim());
+  $("generateBtn").disabled = state.generating || !conn.connected || missing;
 }
 
 function renderServerInfo(stats) {
@@ -201,13 +223,24 @@ function renderModelInfo() {
  * Error box (verbatim ComfyUI errors, monospace, textContent only)
  * ========================================================================== */
 
+let errorReturnFocus = null;
+
 function showError(msg) {
-  $("errorBody").textContent = msg;
+  // Reveal first: a live region whose content changes while display:none is
+  // not reliably announced.
   $("errorBox").classList.add("active");
+  $("errorBody").textContent = msg;
+  errorReturnFocus = document.activeElement;
+  $("errorBox").scrollIntoView({ block: "nearest" });
   $("errorBox").focus({ preventScroll: true });
 }
 function hideError() {
+  if (!$("errorBox").classList.contains("active")) return;
   $("errorBox").classList.remove("active");
+  if (errorReturnFocus && document.contains(errorReturnFocus)) {
+    errorReturnFocus.focus({ preventScroll: true });
+  }
+  errorReturnFocus = null;
 }
 
 /* ============================================================================
@@ -215,8 +248,9 @@ function hideError() {
  * ========================================================================== */
 
 const CONTROL_IDS = [
-  "prompt", "negPrompt", "width", "height", "steps", "cfg", "seed",
+  "prompt", "editInstruction", "negPrompt", "width", "height", "steps", "cfg", "seed",
   "randomizeBtn", "lockSeed", "sampler", "scheduler", "denoise", "batch",
+  "dropZone", "modeT2i", "modeEdit",
 ];
 
 function setControlsDisabled(disabled) {
@@ -224,21 +258,34 @@ function setControlsDisabled(disabled) {
     const node = $(id);
     if (node) node.disabled = disabled;
   }
+  // Batch has no effect on an edit: the sampler latent is derived from one
+  // reference image, so keep the control disabled in that mode.
+  $("batch").disabled = disabled || state.mode === "edit";
   for (const chip of $("sizePresets").children) chip.disabled = disabled;
-  $("controls").setAttribute("aria-busy", String(disabled));
 }
 
 function setGenerating(on) {
   state.generating = on;
   if (on) clearServerBusy();
-  $("generateBtn").disabled = on || !conn.connected;
   $("cancelBtn").classList.toggle("visible", on);
   $("cancelBtn").disabled = false;
   $("cancelBtn").textContent = "Cancel";
   $("progressBox").classList.toggle("active", on);
   $("progressBox").setAttribute("aria-busy", String(on));
   $("viewerOverlay").hidden = !on;
+  // Keep stale result actions out of the tab order while the overlay covers them.
+  $("viewer").toggleAttribute("inert", on);
+  // Screen-reader/keyboard focus must land somewhere real when the focused
+  // control is disabled; park it on Cancel and give it back afterwards.
+  if (on && $("controls").contains(document.activeElement)) {
+    state.focusOnCancel = true;
+    $("cancelBtn").focus({ preventScroll: true });
+  } else if (!on && state.focusOnCancel) {
+    state.focusOnCancel = false;
+    $("generateBtn").focus({ preventScroll: true });
+  }
   setControlsDisabled(on);
+  updateGenerateButton();
   if (!on) {
     $("queueStatus").textContent = "";
     $("queuePosition").textContent = "";
@@ -247,6 +294,7 @@ function setGenerating(on) {
     setPhase("");
     if (state.historyFallbackTimer) { clearTimeout(state.historyFallbackTimer); state.historyFallbackTimer = null; }
     if (state.watchdogTimer) { clearTimeout(state.watchdogTimer); state.watchdogTimer = null; }
+    if (state.cancelTimer) { clearTimeout(state.cancelTimer); state.cancelTimer = null; }
   }
 }
 
@@ -308,7 +356,8 @@ function stopQueuePoll() {
 }
 
 async function updateQueue() {
-  if (!conn.connected) return;
+  if (!conn.connected || state.queueFetchInFlight) return;
+  state.queueFetchInFlight = true;
   try {
     const q = await fetchQueue();
     const running = q.queue_running || [];
@@ -318,6 +367,12 @@ async function updateQueue() {
       $("queuePosition").textContent = total
         ? "queue: " + pending.length + " pending, " + running.length + " running"
         : "";
+      // If our job already left the queue but the 'executed' / sentinel message
+      // was lost (WS blip), recover via /history instead of waiting 30 minutes.
+      if (state.currentPromptId &&
+          !running.concat(pending).some((e) => e[1] === state.currentPromptId)) {
+        checkHistoryFallback();
+      }
       return;
     }
     // Idle: surface a job this page did not start (e.g. a run that kept going
@@ -332,7 +387,9 @@ async function updateQueue() {
     } else {
       clearServerBusy();
     }
-  } catch { /* transient — ignore */ }
+  } catch { /* transient — ignore */ } finally {
+    state.queueFetchInFlight = false;
+  }
 }
 
 async function refreshServerBusy() { await updateQueue(); }
@@ -352,24 +409,30 @@ function clearServerBusy() {
   $("busyNotice").hidden = true;
 }
 
-/** Pull a foreign job's result into the gallery once it finishes. */
+/** Pull a foreign job's result into the gallery once it finishes. The id is
+ * only marked recovered after a successful fetch, so a transient /history
+ * failure can be retried by the next event or queue poll. */
 async function recoverForeign(promptId, images) {
   if (!promptId || state.recoveredIds.has(promptId) || state.generating) return;
-  state.recoveredIds.add(promptId);
   clearServerBusy();
   const imgs = (images && images.length) ? images : await fetchHistoryImages(promptId);
   if (imgs && imgs.length && !state.generating) {
-    addGalleryItems(imgs, undefined);
+    state.recoveredIds.add(promptId);
+    // Unknown parameters: don't label a foreign result with our last prompt.
+    addGalleryItems(imgs, undefined, {});
     announce("Recovered a result from a job that finished after the page reloaded");
   }
 }
 
 /** Reset all run-related UI. Called on load and on bfcache restore so a
- * reloaded page never shows a stale "generating" state. */
+ * reloaded page never shows a stale "generating" state, and so a job that
+ * outlives the restore is treated as foreign and recovered. */
 function resetRunUI() {
   setGenerating(false);
   stopElapsedTimer();
   state.currentPromptId = null;
+  state.ownPromptIds.clear();
+  state.lastParams = null;
   state.stepValue = 0;
   setProgress(0, true);
   $("stepCounter").textContent = "";
@@ -389,12 +452,14 @@ function finishGeneration() {
 
 function onServerMessage(msg) {
   const d = msg.data || {};
-  const mine = (id) => !id || id === state.currentPromptId;
+  // "mine" also covers ids this page submitted before currentPromptId is
+  // assigned, so an early execution_error isn't misread as foreign and dropped.
+  const mine = (id) => !id || id === state.currentPromptId || state.ownPromptIds.has(id);
 
   // A job this page did not submit (kept running across a reload, or another
   // tab) — surface it instead of silently ignoring the events.
   const fid = d.prompt_id;
-  const foreign = !!(fid && fid !== state.currentPromptId && !state.ownPromptIds.has(fid));
+  const foreign = !!(fid && !mine(fid));
   if (foreign && !state.generating &&
       (msg.type === "execution_start" ||
        (msg.type === "executing" && d.node !== null) ||
@@ -409,25 +474,25 @@ function onServerMessage(msg) {
       break;
     }
     case "execution_start":
-      if (d.prompt_id === state.currentPromptId) {
+      if (state.generating && mine(d.prompt_id)) {
         setPhase("executing…");
         announce("Executing");
         appendQueue("execution_start");
       }
       break;
     case "execution_cached":
-      if (d.prompt_id === state.currentPromptId) appendQueue("execution_cached");
+      if (state.generating && mine(d.prompt_id)) appendQueue("execution_cached");
       break;
     case "executing": {
       if (d.node === null) {
         // Sentinel: this prompt finished (or errored). Wait for 'executed',
         // with a /history fallback if nothing arrives shortly.
-        if (d.prompt_id === state.currentPromptId && state.generating) {
+        if (state.generating && mine(d.prompt_id)) {
           setPhase("finalizing…");
           state.historyFallbackTries = 0;
           state.historyFallbackTimer = setTimeout(checkHistoryFallback, 1500);
         }
-      } else if (d.prompt_id === state.currentPromptId) {
+      } else if (state.generating && mine(d.prompt_id)) {
         setPhase("running node " + d.node);
         appendQueue("executing node: " + d.node + (d.display_node ? " (" + d.display_node + ")" : ""));
         bumpProgress();
@@ -446,8 +511,8 @@ function onServerMessage(msg) {
       break;
     }
     case "executed": {
-      if (d.prompt_id === state.currentPromptId && d.output && d.output.images) {
-        addGalleryItems(d.output.images, performance.now() - state.startTime);
+      if (state.generating && mine(d.prompt_id) && d.output && d.output.images) {
+        addGalleryItems(d.output.images, performance.now() - state.startTime, state.lastParams);
         announce("Generation complete");
         finishGeneration();
       } else if (foreign && d.output && d.output.images) {
@@ -456,7 +521,7 @@ function onServerMessage(msg) {
       break;
     }
     case "execution_error": {
-      if (d.prompt_id === state.currentPromptId) {
+      if (state.generating && mine(d.prompt_id)) {
         showError("ComfyUI execution error:\n" + JSON.stringify(d, null, 2));
         announce("Generation failed");
         finishGeneration();
@@ -508,17 +573,27 @@ async function checkHistoryFallback() {
  * ========================================================================== */
 
 function applyItemParams(item) {
-  $("prompt").value = item.prompt || "";
+  const edit = item.mode === "edit";
+  setMode(edit ? "edit" : "t2i");
+  if (edit) {
+    $("editInstruction").value = item.instruction || "";
+    // Re-attach the original reference files (still on the server as type=input).
+    restoreEditImages(item.references || []);
+  } else {
+    $("prompt").value = item.prompt || "";
+  }
   $("negPrompt").value = item.negPrompt || "";
-  $("width").value = item.width;
-  $("height").value = item.height;
-  syncPresetFromInputs();
-  $("steps").value = item.steps;
-  $("stepsVal").textContent = item.steps;
-  $("cfg").value = item.cfg;
-  $("seed").value = item.seed;
+  if (item.width !== undefined) {
+    $("width").value = item.width;
+    $("height").value = item.height;
+    syncPresetFromInputs();
+  }
+  if (item.steps !== undefined) { $("steps").value = item.steps; $("stepsVal").textContent = item.steps; }
+  if (item.cfg !== undefined) $("cfg").value = item.cfg;
+  if (item.seed !== undefined) $("seed").value = item.seed;
   $("lockSeed").classList.add("active");
   syncLockButton();
+  updateGenerateButton();
   saveSettings();
 }
 
@@ -537,29 +612,39 @@ function showInViewer(item, focusViewer = false) {
   const viewer = $("viewer");
   viewer.textContent = ""; // clears all children
 
-  const img = el("img", { src: item.url, alt: item.prompt || "Generated image" });
+  const isEdit = item.mode === "edit";
+  const desc = isEdit ? (item.instruction || "") : (item.prompt || "");
+  const img = el("img", { src: item.url, alt: desc || "Generated image" });
   viewer.append(el("div", { class: "result-img-wrap" }, img));
 
   const meta = el("div", { class: "result-meta" });
   const facts = el("div", { class: "meta-facts" });
+  const grid = el("div", { class: "meta-grid" },
+    el("span", { class: "meta-k", text: "Mode" }),  el("span", { text: isEdit ? "Edit" : "Text → Image" }),
+    el("span", { class: "meta-k", text: "Seed" }),  el("span", { text: String(item.seed) }),
+    el("span", { class: "meta-k", text: "Steps" }), el("span", { text: String(item.steps) }),
+    el("span", { class: "meta-k", text: "CFG" }),   el("span", { text: String(item.cfg) }),
+    el("span", { class: "meta-k", text: "Size" }),  el("span", { text: item.width + "×" + item.height }),
+    el("span", { class: "meta-k", text: "Time" }),  el("span", { text: Number.isFinite(item.elapsed) ? (item.elapsed / 1000).toFixed(1) + "s" : "— (recovered)" }),
+    el("span", { class: "meta-k", text: "File" }),  el("span", { class: "mono", text: item.filename }),
+  );
+  if (isEdit && item.references && item.references.length) {
+    grid.append(
+      el("span", { class: "meta-k", text: "Refs" }),
+      el("span", { class: "mono", text: item.references.map((r) => r.name).join(", ") }),
+    );
+  }
   facts.append(
-    el("div", { class: "meta-prompt", text: item.prompt || "(no prompt)" }),
-    el("div", { class: "meta-grid" },
-      el("span", { class: "meta-k", text: "Seed" }),   el("span", { text: String(item.seed) }),
-      el("span", { class: "meta-k", text: "Steps" }),  el("span", { text: String(item.steps) }),
-      el("span", { class: "meta-k", text: "CFG" }),    el("span", { text: String(item.cfg) }),
-      el("span", { class: "meta-k", text: "Size" }),   el("span", { text: item.width + "×" + item.height }),
-      el("span", { class: "meta-k", text: "Time" }),   el("span", { text: Number.isFinite(item.elapsed) ? (item.elapsed / 1000).toFixed(1) + "s" : "— (recovered)" }),
-      el("span", { class: "meta-k", text: "File" }),   el("span", { class: "mono", text: item.filename }),
-    ),
+    el("div", { class: "meta-prompt", text: desc || "(no description)" }),
+    grid,
   );
   meta.append(facts);
 
   const actions = el("div", { class: "meta-actions", id: "metaActions" });
   actions.append(
     makeActionBtn("Open", "open", () => window.open(item.url, "_blank", "noopener")),
-    makeActionBtn("Copy prompt", "copy", async (e) => {
-      const ok = await copyText(item.prompt || "");
+    makeActionBtn(isEdit ? "Copy instruction" : "Copy prompt", "copy", async (e) => {
+      const ok = await copyText(desc);
       const btn = e.currentTarget;
       const old = btn.textContent;
       btn.textContent = ok ? "Copied ✓" : "Copy failed";
@@ -584,17 +669,23 @@ function showInViewer(item, focusViewer = false) {
   if (focusViewer) viewer.focus({ preventScroll: true });
 }
 
-function addGalleryItems(images, elapsedMs) {
+function addGalleryItems(images, elapsedMs, params, focusViewer = true) {
   if (!images || !images.length) return;
-  const p = state.lastParams || {};
+  const p = (params === undefined ? (state.lastParams || {}) : params);
+  const isEdit = p.mode === "edit";
   const items = images.map((img) => ({
     filename: img.filename,
     subfolder: img.subfolder || "",
     type: img.type || "output",
     url: viewUrl(img),
+    mode: p.mode || "t2i",
+    instruction: p.instruction,
+    references: p.images
+      ? p.images.map((r) => ({ name: r.name, subfolder: r.subfolder, type: r.type }))
+      : null,
     // Snapshot the parameters actually submitted, not the live inputs (the
     // user may have edited them while the job was running).
-    prompt: p.prompt !== undefined ? p.prompt : $("prompt").value.trim(),
+    prompt: isEdit ? (p.instruction || "") : (p.prompt !== undefined ? p.prompt : $("prompt").value.trim()),
     negPrompt: p.negPrompt !== undefined ? p.negPrompt : $("negPrompt").value.trim(),
     seed: p.seed !== undefined ? p.seed : $("seed").value,
     steps: p.steps !== undefined ? p.steps : $("steps").value,
@@ -606,19 +697,34 @@ function addGalleryItems(images, elapsedMs) {
   }));
   for (const item of items) state.gallery.unshift(item);
   renderGallery();
-  showInViewer(items[0], true);
+  showInViewer(items[0], focusViewer);
   $("galleryPanel").hidden = false;
+}
+
+/** Re-focus a gallery thumbnail after a re-render destroys the old node. */
+function focusGalleryIndex(i) {
+  const thumbs = $("gallery").querySelectorAll(".thumb");
+  const target = (i >= 0 && thumbs[i]) ? thumbs[i] : $("generateBtn");
+  if (target && !target.disabled) target.focus({ preventScroll: true });
+}
+
+/** Focus the first usable control of the active mode (used after a clear). */
+function focusInputArea() {
+  const target = state.mode === "edit" ? $("dropZone") : $("prompt");
+  if (target && !target.disabled) target.focus({ preventScroll: true });
 }
 
 function removeGalleryItem(item) {
   const idx = state.gallery.indexOf(item);
-  if (idx >= 0) state.gallery.splice(idx, 1);
+  if (idx < 0) return;
+  state.gallery.splice(idx, 1);
   if (state.selected === item) {
     state.selected = null;
     if (state.gallery.length) showInViewer(state.gallery[0]);
     else showPlaceholder();
   }
   renderGallery();
+  focusGalleryIndex(Math.min(idx, state.gallery.length - 1));
 }
 
 function clearGallery() {
@@ -627,6 +733,7 @@ function clearGallery() {
   renderGallery();
   $("galleryPanel").hidden = true;
   showPlaceholder();
+  focusInputArea();
 }
 
 function showPlaceholder() {
@@ -650,17 +757,19 @@ function renderGallery() {
   gal.textContent = "";
   state.gallery.forEach((item) => {
     const selected = !!(state.selected && state.selected.ts === item.ts);
+    const desc = item.mode === "edit" ? (item.instruction || "") : (item.prompt || "");
+    const label = desc || item.filename;
     const wrap = el("div", { class: "thumb-wrap" });
     const thumb = el("button", {
       class: "thumb" + (selected ? " selected" : ""),
       type: "button",
-      dataset: { filename: item.filename, ts: String(item.ts) },
-      title: item.prompt || item.filename,
-      "aria-label": "View result: " + (item.prompt || item.filename),
+      dataset: { filename: item.filename, ts: String(item.ts), mode: item.mode || "t2i" },
+      title: label,
+      "aria-label": "View result: " + label,
       "aria-pressed": String(selected),
       onclick: () => showInViewer(item),
     });
-    thumb.append(el("img", { src: previewUrl(item), alt: item.prompt || "Gallery image", loading: "lazy" }));
+    thumb.append(el("img", { src: previewUrl(item), alt: label, loading: "lazy" }));
     const del = el("button", {
       class: "thumb-del", type: "button", text: "✕",
       "aria-label": "Remove image",
@@ -673,6 +782,7 @@ function renderGallery() {
   const n = state.gallery.length;
   $("galleryCount").textContent = n + (n === 1 ? " image" : " images");
   $("galleryEmpty").hidden = n > 0;
+  announce(n + (n === 1 ? " image" : " images") + " in session");
 }
 
 /* ============================================================================
@@ -695,6 +805,25 @@ async function generate() {
   if (state.generating || !conn.connected) return;
   hideError();
 
+  const edit = state.mode === "edit";
+  if (edit) {
+    if (state.editImages.some((it) => it.status === "uploading")) {
+      showError("A reference image is still uploading — try again in a moment.");
+      return;
+    }
+    if (!state.editImages.some((it) => it.status === "ready")) {
+      showError("Add at least one reference image before editing.");
+      return;
+    }
+    if (!$("editInstruction").value.trim()) {
+      showError("Enter an edit instruction first.");
+      return;
+    }
+  } else if (!$("prompt").value.trim()) {
+    showError("Enter a prompt first.");
+    return;
+  }
+
   // Auto-randomize seed only when unlocked AND the user hasn't typed one.
   if (!$("lockSeed").classList.contains("active") && !seedTouched) {
     $("seed").value = Math.floor(Math.random() * 1e15);
@@ -702,8 +831,7 @@ async function generate() {
   seedTouched = false;
   saveSettings();
 
-  const p = {
-    prompt:    $("prompt").value.trim(),
+  const common = {
     negPrompt: $("negPrompt").value.trim(),
     width:     clampInt($("width").value, CONFIG.MIN_SIZE, CONFIG.MAX_SIZE, 1024),
     height:    clampInt($("height").value, CONFIG.MIN_SIZE, CONFIG.MAX_SIZE, 1024),
@@ -715,13 +843,40 @@ async function generate() {
     seed:      clampInt($("seed").value, 0, Number.MAX_SAFE_INTEGER, CONFIG.DEFAULTS.seed),
     sampler:   $("sampler").value || CONFIG.SAMPLER_NAME,
     scheduler: $("scheduler").value || CONFIG.SCHEDULER,
-    denoise:   clampNum($("denoise").value, 0, 1, CONFIG.DENOISE),
-    batch:     clampInt($("batch").value, 1, 16, 1),
+    denoise:   clampNum($("denoise").value, 0, 1, edit ? CONFIG.EDIT_DENOISE : CONFIG.DENOISE),
   };
 
-  const graph = buildGraph(p);
+  let p;
+  let graph;
+  if (edit) {
+    const refs = state.editImages.filter((it) => it.status === "ready");
+    p = {
+      mode: "edit",
+      instruction: $("editInstruction").value.trim(),
+      // The encoder resizes references to this pixel budget; output follows the
+      // first reference's aspect ratio. The Size control drives that budget.
+      resolution: Math.max(0, Math.min(4096, Math.round(common.width / 32) * 32)),
+      images: refs.map((it) => ({
+        image: it.image,
+        name: it.server.name,
+        subfolder: it.server.subfolder,
+        type: it.server.type,
+      })),
+      ...common,
+    };
+    graph = buildEditGraph(p);
+  } else {
+    p = {
+      mode: "t2i",
+      prompt: $("prompt").value.trim(),
+      batch:  clampInt($("batch").value, 1, 16, 1),
+      ...common,
+    };
+    graph = buildGraph(p);
+  }
   state.lastParams = p;
 
+  if (state.cancelTimer) { clearTimeout(state.cancelTimer); state.cancelTimer = null; }
   setGenerating(true);
   state.maxSteps = p.steps;
   state.stepValue = 0;
@@ -756,12 +911,26 @@ async function cancelGeneration() {
   const btn = $("cancelBtn");
   btn.textContent = "Cancelling…";
   btn.disabled = true;
-  const id = state.currentPromptId;
-  await interrupt(id);
-  await cancelQueued(id);
+  // Cancel may be pressed during the brief submit window before the prompt_id
+  // is known; wait for it so we can cancel the right job instead of a no-op.
+  let id = state.currentPromptId;
+  for (let i = 0; !id && i < 10 && state.generating; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    id = state.currentPromptId;
+  }
+  if (id) {
+    // ComfyUI's /interrupt stops whichever prompt is executing, so only call
+    // it when our own prompt is the running one — otherwise a queued job's
+    // Cancel would kill an unrelated GPU job.
+    const q = await fetchQueue().catch(() => null);
+    const running = q && (q.queue_running || []).some((e) => e[1] === id);
+    if (running) await interrupt(id);
+    await cancelQueued(id);
+  }
   appendQueue("interrupt requested…");
   // Watchdog: if no execution_interrupted event arrives, don't stay stuck.
-  setTimeout(() => {
+  state.cancelTimer = setTimeout(() => {
+    state.cancelTimer = null;
     if (state.generating) {
       showError("Interrupt requested — no response from ComfyUI; resetting.");
       finishGeneration();
@@ -798,21 +967,31 @@ function toggleLock() {
  * Size presets
  * ========================================================================== */
 
+function setChipActive(size) {
+  for (const chip of $("sizePresets").children) {
+    const on = chip.dataset.size === String(size);
+    chip.classList.toggle("active", on);
+    chip.setAttribute("aria-pressed", String(on));
+  }
+}
+
 function applyPreset(size) {
   $("width").value = size;
   $("height").value = size;
-  for (const chip of $("sizePresets").children) {
-    chip.classList.toggle("active", chip.dataset.size === String(size));
-  }
+  setChipActive(size);
   $("customSizeRow").classList.remove("visible");
-  $("customChip").classList.remove("active");
+  const cc = $("customChip");
+  cc.classList.remove("active");
+  cc.setAttribute("aria-pressed", "false");
   saveSettings();
 }
 
 function markCustom() {
-  for (const chip of $("sizePresets").children) chip.classList.remove("active");
+  setChipActive(null);
   $("customSizeRow").classList.add("visible");
-  $("customChip").classList.add("active");
+  const cc = $("customChip");
+  cc.classList.add("active");
+  cc.setAttribute("aria-pressed", "true");
   saveSettings();
 }
 
@@ -822,11 +1001,171 @@ function syncPresetFromInputs() {
   if (match) {
     applyPreset(match);
   } else {
-    for (const chip of $("sizePresets").children) chip.classList.remove("active");
-    $("customChip").classList.add("active");
+    setChipActive(null);
+    const cc = $("customChip");
+    cc.classList.add("active");
+    cc.setAttribute("aria-pressed", "true");
     $("customSizeRow").classList.add("visible");
   }
   saveSettings();
+}
+
+/* ============================================================================
+ * Image edit — mode switch, reference uploads, drag & drop / paste
+ * ========================================================================== */
+
+function setMode(mode) {
+  state.mode = mode === "edit" ? "edit" : "t2i";
+  const edit = state.mode === "edit";
+  $("t2iFields").hidden = edit;
+  $("editFields").hidden = !edit;
+  for (const [id, on] of [["modeT2i", !edit], ["modeEdit", edit]]) {
+    const btn = $(id);
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", String(on));
+    btn.tabIndex = on ? 0 : -1;
+  }
+  // Batch only applies to the T2I latent; re-apply the mode-dependent disable.
+  if ($("batch")) $("batch").disabled = state.generating || edit;
+  updateGenerateButton();
+  saveSettings();
+}
+
+/** Allowed raster extension derived from the filename or MIME type. */
+function safeExt(file) {
+  const m = /\.([a-z0-9]+)$/i.exec(file.name || "");
+  const ext = m ? m[1].toLowerCase() : "";
+  if (["png", "jpg", "jpeg", "webp", "gif", "bmp"].includes(ext)) return ext;
+  const byType = {
+    "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp",
+    "image/gif": "gif", "image/bmp": "bmp",
+  };
+  return byType[(file.type || "").toLowerCase()] || "";
+}
+
+function fileError(file) {
+  if (!file || file.size === 0) return "the file is empty";
+  if (file.size > CONFIG.UPLOAD.maxBytes) {
+    return "larger than " + Math.round(CONFIG.UPLOAD.maxBytes / (1024 * 1024)) + " MB";
+  }
+  const type = (file.type || "").toLowerCase();
+  if (type && !CONFIG.UPLOAD.accept.includes(type)) return "unsupported type " + type;
+  if (!safeExt(file)) return "unsupported file type";
+  return null;
+}
+
+function revokeEditPreview(item) {
+  if (item.previewUrl && item.previewUrl.startsWith("blob:")) URL.revokeObjectURL(item.previewUrl);
+}
+
+function addEditFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  hideError();
+  let added = 0;
+  for (const file of files) {
+    if (state.editImages.length >= CONFIG.EDIT_MAX_IMAGES) {
+      showError("At most " + CONFIG.EDIT_MAX_IMAGES + " reference images are supported.");
+      break;
+    }
+    const err = fileError(file);
+    if (err) { showError("Could not add \"" + file.name + "\": " + err + "."); continue; }
+    const item = {
+      id: "ref" + (++state.editSeq),
+      name: file.name,
+      previewUrl: URL.createObjectURL(file),
+      status: "uploading",
+      progress: 0,
+      statusEl: null,
+      file,
+      server: null,
+      image: null,
+    };
+    state.editImages.push(item);
+    added++;
+    uploadEditImage(item);
+  }
+  if (added) announce(added + (added === 1 ? " reference image added" : " reference images added"));
+  renderEditImages();
+  updateGenerateButton();
+}
+
+async function uploadEditImage(item) {
+  const ext = safeExt(item.file);
+  const serverName = CONFIG.UPLOAD.prefix + item.id + "_" +
+    Math.random().toString(36).slice(2, 8) + (ext ? "." + ext : "");
+  try {
+    const data = await uploadImage(item.file, serverName, (p) => {
+      item.progress = p;
+      if (item.statusEl) item.statusEl.textContent = Math.round(p * 100) + "%";
+    });
+    item.server = { name: data.name, subfolder: data.subfolder || "", type: data.type || "input" };
+    item.image = imageRef(item.server);
+    item.status = "ready";
+    item.file = null; // release the File handle
+  } catch (e) {
+    item.status = "error";
+    item.error = e.message || String(e);
+    showError("Upload failed for \"" + item.name + "\":\n" + item.error);
+  }
+  renderEditImages();
+  updateGenerateButton();
+}
+
+function renderEditImages() {
+  const wrap = $("editThumbs");
+  wrap.textContent = "";
+  state.editImages.forEach((item) => {
+    const t = el("div", { class: "ref-thumb " + item.status, title: item.name });
+    t.append(el("img", { src: item.previewUrl, alt: item.name }));
+    const status = el("span", { class: "ref-status" });
+    item.statusEl = status;
+    if (item.status === "uploading") status.textContent = Math.round((item.progress || 0) * 100) + "%";
+    else if (item.status === "error") status.textContent = "!";
+    t.append(status);
+    t.append(el("button", {
+      class: "ref-del", type: "button", text: "✕",
+      "aria-label": "Remove reference image " + item.name,
+      title: "Remove reference image",
+      onclick: () => removeEditImage(item),
+    }));
+    wrap.append(t);
+  });
+  $("editThumbsEmpty").hidden = state.editImages.length > 0;
+}
+
+function removeEditImage(item) {
+  const idx = state.editImages.indexOf(item);
+  if (idx < 0) return;
+  revokeEditPreview(item);
+  state.editImages.splice(idx, 1);
+  renderEditImages();
+  updateGenerateButton();
+  const nodes = $("editThumbs").querySelectorAll(".ref-thumb");
+  const next = nodes[Math.min(idx, state.editImages.length - 1)];
+  if (next) next.querySelector(".ref-del").focus({ preventScroll: true });
+  else $("dropZone").focus({ preventScroll: true });
+  announce("Reference image removed");
+}
+
+/** Rebuild the reference list from a gallery item's stored descriptors (the
+ * files are still on the server as type=input, so nothing is re-uploaded). */
+function restoreEditImages(references) {
+  for (const it of state.editImages) revokeEditPreview(it);
+  state.editImages = references.map((r, i) => {
+    const server = { name: r.name, subfolder: r.subfolder || "", type: r.type || "input" };
+    return {
+      id: "restored" + (++state.editSeq) + "_" + i,
+      name: server.name,
+      previewUrl: viewUrl(server),
+      status: "ready",
+      progress: 1,
+      statusEl: null,
+      server,
+      image: imageRef(server),
+    };
+  });
+  renderEditImages();
 }
 
 /* ============================================================================
@@ -840,11 +1179,13 @@ function buildSizePresets() {
       class: "chip", type: "button",
       dataset: { size: String(size) },
       text: String(size),
+      "aria-pressed": "false",
       onclick: () => applyPreset(size),
     }));
   }
   wrap.append(el("button", {
-    class: "chip", type: "button", id: "customChip", text: "Custom", onclick: markCustom,
+    class: "chip", type: "button", id: "customChip", text: "Custom",
+    "aria-pressed": "false", onclick: markCustom,
   }));
 }
 
@@ -893,6 +1234,56 @@ function wireEvents() {
   $("generateBtn").addEventListener("click", generate);
   $("cancelBtn").addEventListener("click", cancelGeneration);
 
+  // Mode switch (tablist) — click or Left/Right arrow.
+  for (const [id, mode] of [["modeT2i", "t2i"], ["modeEdit", "edit"]]) {
+    const btn = $(id);
+    btn.addEventListener("click", () => setMode(mode));
+    btn.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      e.preventDefault();
+      const next = mode === "t2i" ? "edit" : "t2i";
+      setMode(next);
+      $(next === "t2i" ? "modeT2i" : "modeEdit").focus();
+    });
+  }
+
+  // Reference images: click-to-browse, drag & drop, and Ctrl/Cmd+V paste.
+  const dz = $("dropZone");
+  dz.addEventListener("click", () => { if (!dz.disabled) $("fileInput").click(); });
+  for (const ev of ["dragenter", "dragover"]) {
+    dz.addEventListener(ev, (e) => { e.preventDefault(); if (!dz.disabled) dz.classList.add("drag"); });
+  }
+  for (const ev of ["dragleave", "dragend"]) {
+    dz.addEventListener(ev, () => dz.classList.remove("drag"));
+  }
+  dz.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dz.classList.remove("drag");
+    if (!dz.disabled) addEditFiles(e.dataTransfer && e.dataTransfer.files);
+  });
+  $("fileInput").addEventListener("change", (e) => {
+    addEditFiles(e.target.files);
+    e.target.value = "";
+  });
+  // Never let a stray drop navigate the page away from the app.
+  document.addEventListener("dragover", (e) => e.preventDefault());
+  document.addEventListener("drop", (e) => e.preventDefault());
+  document.addEventListener("paste", (e) => {
+    if (state.mode !== "edit" || state.generating) return;
+    const active = document.activeElement;
+    if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT")) return;
+    const items = e.clipboardData ? e.clipboardData.items : null;
+    if (!items) return;
+    const files = [];
+    for (const it of items) {
+      if (it.kind === "file" && it.type.startsWith("image/")) {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length) { e.preventDefault(); addEditFiles(files); }
+  });
+
   // Collapsibles
   wireCollapsible("negToggle", "negBody");
   wireCollapsible("advToggle", "advBody");
@@ -925,19 +1316,21 @@ function wireEvents() {
   $("height").addEventListener("input", syncPresetFromInputs);
 
   // Persist on change; mark the seed as user-edited on any manual input.
-  for (const id of ["prompt", "negPrompt", "steps", "cfg", "seed", "sampler", "scheduler", "denoise", "batch"]) {
+  for (const id of ["prompt", "editInstruction", "negPrompt", "steps", "cfg", "seed", "sampler", "scheduler", "denoise", "batch"]) {
     $(id).addEventListener("change", saveSettings);
   }
   $("seed").addEventListener("input", () => { seedTouched = true; });
 
-  // Prompt autosave (debounced) so a closed tab doesn't lose the text.
+  // Prompt / instruction autosave (debounced) so a closed tab doesn't lose text.
   let saveTimer = null;
-  for (const id of ["prompt", "negPrompt"]) {
+  for (const id of ["prompt", "editInstruction", "negPrompt"]) {
     $(id).addEventListener("input", () => {
       clearTimeout(saveTimer);
       saveTimer = setTimeout(saveSettings, 500);
     });
   }
+  // An instruction is required to generate an edit.
+  $("editInstruction").addEventListener("input", updateGenerateButton);
 
   // Steps slider live value
   $("steps").addEventListener("input", () => {
@@ -949,9 +1342,9 @@ function wireEvents() {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
       generate();
-    } else if (e.key === "Escape" && state.generating) {
-      e.preventDefault();
-      cancelGeneration();
+    } else if (e.key === "Escape") {
+      if (state.generating) { e.preventDefault(); cancelGeneration(); }
+      else if ($("errorBox").classList.contains("active")) { e.preventDefault(); hideError(); }
     }
   });
 }
@@ -963,6 +1356,7 @@ function wireEvents() {
 function initInputs() {
   const s = SETTINGS;
   $("prompt").value = s.prompt !== undefined ? s.prompt : CONFIG.DEFAULTS.prompt;
+  $("editInstruction").value = s.editInstruction !== undefined ? s.editInstruction : CONFIG.DEFAULTS.editInstruction;
   $("negPrompt").value = s.negPrompt !== undefined ? s.negPrompt : CONFIG.DEFAULTS.negPrompt;
   $("steps").value = s.steps !== undefined ? s.steps : CONFIG.DEFAULTS.steps;
   $("cfg").value = s.cfg !== undefined ? s.cfg : CONFIG.DEFAULTS.cfg;
@@ -989,6 +1383,11 @@ function initInputs() {
   } else {
     applyPreset(CONFIG.DEFAULTS.width);
   }
+
+  renderEditImages();
+  // Reference files can't survive a reload, so restore the mode but leave the
+  // drop zone empty (Generate stays disabled until an image is added).
+  setMode(s.mode === "edit" ? "edit" : "t2i");
 }
 
 export function initUI() {
@@ -996,9 +1395,16 @@ export function initUI() {
   initInputs();
   wireEvents();
   resetRunUI(); // never start in a stale "generating" state
-  renderStatus(false);
+  // Stay in the neutral "Connecting…" state until the first probe reports —
+  // don't flash the unreachable banner / alert on every load.
+  $("statusPill").classList.add("retrying");
   $("viewer").setAttribute("tabindex", "-1");
   startStatsPolling();
+  // Pause the queue poll while the tab is hidden; resume when visible again.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopQueuePoll();
+    else if (conn.connected) startQueuePoll();
+  });
   // A back/forward-cache restore can bring back a DOM that still shows the
   // previous run; reset it and re-sync with the server.
   window.addEventListener("pageshow", (e) => {

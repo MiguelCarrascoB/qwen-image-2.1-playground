@@ -14,11 +14,11 @@
       it from a local static server instead of opening the file directly.
   -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' http://127.0.0.1:8188 data: blob:; connect-src 'self' http://127.0.0.1:8188 ws://127.0.0.1:8188">
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' http://127.0.0.1:8188 data: blob:; connect-src 'self' http://127.0.0.1:8188 ws://127.0.0.1:8188; object-src 'none'; base-uri 'self'; form-action 'none'; worker-src 'self' blob:">
 
   <title>Qwen-Image-2.1 — ComfyUI Playground</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="styles.css?v=3">
+  <link rel="stylesheet" href="styles.css?v=4">
 </head>
 <body>
 
@@ -67,8 +67,34 @@
         </div>
       </details>
 
-      <label for="prompt">Prompt</label>
-      <textarea id="prompt" placeholder="A cozy cabin in a snowy forest at dusk…"></textarea>
+      <div class="mode-switch" role="tablist" aria-label="Generation mode">
+        <button class="mode-btn active" id="modeT2i" type="button" role="tab"
+                aria-selected="true" aria-controls="t2iFields">Text → Image</button>
+        <button class="mode-btn" id="modeEdit" type="button" role="tab"
+                aria-selected="false" aria-controls="editFields">Edit image</button>
+      </div>
+
+      <div id="t2iFields" role="tabpanel" aria-labelledby="modeT2i">
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" placeholder="A cozy cabin in a snowy forest at dusk…"></textarea>
+      </div>
+
+      <div id="editFields" role="tabpanel" aria-labelledby="modeEdit" hidden>
+        <label id="refLabel">Reference images</label>
+        <button class="dropzone" id="dropZone" type="button" aria-labelledby="refLabel" aria-describedby="refHint">
+          <span class="dz-icon" aria-hidden="true">＋</span>
+          <span class="dz-title">Drop images, click to browse, or paste</span>
+          <span class="dz-sub">PNG · JPEG · WebP · GIF · BMP</span>
+        </button>
+        <input type="file" id="fileInput" hidden multiple
+               accept="image/png,image/jpeg,image/webp,image/gif,image/bmp">
+        <div class="ref-thumbs" id="editThumbs"></div>
+        <div class="hint" id="editThumbsEmpty">No reference images yet.</div>
+        <div class="hint" id="refHint">Up to 16 images, 20 MB each. The first sets the output aspect ratio.</div>
+
+        <label for="editInstruction">Edit instruction</label>
+        <textarea id="editInstruction" placeholder="Make the jacket bright red, keep the pose and background…"></textarea>
+      </div>
 
       <div class="collapsible">
         <button class="collapsible-head" id="negToggle" type="button" aria-expanded="false" aria-controls="negBody">
@@ -81,19 +107,19 @@
         </div>
       </div>
 
-      <label>Size</label>
-      <div class="chips" id="sizePresets"></div>
+      <label id="sizeLabel">Size</label>
+      <div class="chips" id="sizePresets" role="group" aria-labelledby="sizeLabel"></div>
       <div class="row custom-size-row" id="customSizeRow">
         <div>
           <label for="width">Width</label>
-          <input type="number" id="width" min="512" max="2048" step="64" value="1024">
+          <input type="number" id="width" min="512" max="2048" step="64" value="1024" aria-describedby="sizeHint">
         </div>
         <div>
           <label for="height">Height</label>
-          <input type="number" id="height" min="512" max="2048" step="64" value="1024">
+          <input type="number" id="height" min="512" max="2048" step="64" value="1024" aria-describedby="sizeHint">
         </div>
       </div>
-      <div class="hint">512 – 2048 · multiples of 64 recommended</div>
+      <div class="hint" id="sizeHint">512 – 2048 · multiples of 64 recommended</div>
 
       <label for="steps">Steps <span class="slider-val" id="stepsVal">40</span></label>
       <input type="range" id="steps" min="1" max="100" value="40" step="1">
@@ -109,8 +135,8 @@
         </div>
       </div>
       <div class="seed-actions">
-        <button class="icon-btn" id="randomizeBtn" type="button" title="Randomize seed">🎲</button>
-        <button class="icon-btn lock" id="lockSeed" type="button" aria-pressed="false" title="Seed unlocked — new random seed per generation">🔓</button>
+        <button class="icon-btn" id="randomizeBtn" type="button" title="Randomize seed" aria-label="Randomize seed">🎲</button>
+        <button class="icon-btn lock" id="lockSeed" type="button" aria-pressed="false" aria-label="Lock seed" title="Seed unlocked — new random seed per generation">🔓</button>
       </div>
 
       <div class="collapsible advanced">
@@ -151,6 +177,7 @@
           <span class="phase" id="phase"></span>
         </div>
         <div class="progress-bar" id="progressBar" role="progressbar"
+             aria-label="Generation progress"
              aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
           <div id="progressFill"></div>
         </div>
@@ -207,6 +234,6 @@
 
   </div>
 
-  <script type="module" src="js/main.js?v=3"></script>
+  <script type="module" src="js/main.js?v=4"></script>
 </body>
 </html>

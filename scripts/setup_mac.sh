@@ -25,4 +25,5 @@ hf_hub_download("Comfy-Org/Qwen-Image-2.1", "vae/qwen_image_2.1_vae_bf16.safeten
                 local_dir="ComfyUI/models/vae", local_dir_use_symlinks=False)
 EOF
 
-echo "Done. Start with ./scripts/start_comfyui_mac.sh, then open app/index.html"
+echo "Done. Start ComfyUI with ./scripts/start_comfyui_mac.sh, serve the UI with"
+echo "python3 scripts/serve_app.py, then browse to http://127.0.0.1:8080"

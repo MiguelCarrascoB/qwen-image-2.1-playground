@@ -6,7 +6,7 @@
  * input names or wiring without re-testing against the live server.
  * ========================================================================== */
 
-import { CONFIG } from "./config.js?v=3";
+import { CONFIG } from "./config.js?v=4";
 
 export const serverBase = CONFIG.SERVER.replace(/\/$/, "");
 
@@ -33,7 +33,12 @@ export function onConnectionChange(fn) {
 }
 
 function emitStatus(connected, extra) {
+  const changed = connected !== conn.connected;
   conn.connected = connected;
+  // Only notify on a real transition (or when there's detail to show). This
+  // suppresses the duplicate checkConnection + ws.onopen notification that made
+  // the UI refetch /system_stats and /queue twice per connect.
+  if (!changed && !extra) return;
   for (const fn of conn.listeners) {
     try { fn(connected, extra); } catch { /* listener errors never break the loop */ }
   }
@@ -173,6 +178,8 @@ export function validateNodeTypes() {
     CONFIG.KSAMPLER_TYPE,
     CONFIG.VAE_DECODE_TYPE,
     CONFIG.SAVE_IMAGE_TYPE,
+    // Image edit reuses the same encoder plus LoadImage for the references.
+    CONFIG.LOAD_IMAGE_TYPE,
   ];
   if (CONFIG.CFG_NORM_TYPE) required.push(CONFIG.CFG_NORM_TYPE);
   return required.filter((t) => !(t in info));
@@ -228,6 +235,104 @@ export function buildGraph(p) {
   add("save", CONFIG.SAVE_IMAGE_TYPE, { images: ["decode", 0], filename_prefix: CONFIG.FILENAME_PREFIX });
 
   return g;
+}
+
+/** Image-edit graph. Reference images are uploaded first (see uploadImage);
+ * each becomes a LoadImage feeding the encoder's autogrow `images.image_N`
+ * inputs. The encoder's third output (`latent`, sized to the first reference)
+ * seeds KSampler, so no EmptyLatentImage / VAEEncode is involved. Verified
+ * end-to-end against the live server on 2026-09-20. */
+export function buildEditGraph(p) {
+  const g = {};
+  const add = (id, classType, inputs) => { g[id] = { class_type: classType, inputs }; };
+
+  // Same loaders as the T2I path.
+  add("unet", CONFIG.UNET_LOADER_TYPE, { unet_name: CONFIG.UNET_GGUF });
+  add("clip", CONFIG.CLIP_LOADER_TYPE, { clip_name: CONFIG.CLIP_NAME, type: CONFIG.CLIP_TYPE });
+  add("vae",  CONFIG.VAE_LOADER_TYPE,  { vae_name: CONFIG.VAE_NAME });
+
+  // One LoadImage per reference + its `images.image_N` encoder input.
+  const enc = {
+    clip: ["clip", 0],
+    prompt: p.instruction,
+    negative_prompt: p.negPrompt || "",
+    resolution: p.resolution,
+    vae: ["vae", 0],
+  };
+  (p.images || []).forEach((img, i) => {
+    const id = "ref" + (i + 1);
+    add(id, CONFIG.LOAD_IMAGE_TYPE, { image: img.image });
+    enc["images.image_" + (i + 1)] = [id, 0];
+  });
+  add("enc", CONFIG.TEXT_ENCODE_TYPE, enc);
+
+  let modelRef = ["unet", 0];
+  if (CONFIG.CFG_NORM_TYPE) {
+    add("cfgnorm", CONFIG.CFG_NORM_TYPE, { model: ["unet", 0] });
+    modelRef = ["cfgnorm", 0];
+  }
+
+  add("ksampler", CONFIG.KSAMPLER_TYPE, {
+    seed: p.seed,
+    steps: p.steps,
+    cfg: p.cfg,
+    sampler_name: p.sampler || CONFIG.SAMPLER_NAME,
+    scheduler: p.scheduler || CONFIG.SCHEDULER,
+    denoise: (p.denoise === undefined ? CONFIG.EDIT_DENOISE : p.denoise),
+    model: modelRef,
+    positive: ["enc", 0],
+    negative: ["enc", 1],
+    latent_image: ["enc", 2],
+  });
+
+  add("decode", CONFIG.VAE_DECODE_TYPE, { samples: ["ksampler", 0], vae: ["vae", 0] });
+  add("save", CONFIG.SAVE_IMAGE_TYPE, { images: ["decode", 0], filename_prefix: CONFIG.EDIT_FILENAME_PREFIX });
+
+  return g;
+}
+
+/** POST /upload/image as multipart/form-data. `serverName` is the randomized
+ * on-disk name (the UI never reuses the user's filename, and overwrite is off,
+ * so an upload can't clobber an existing input file). Resolves with the
+ * server's `{name, subfolder, type}` and reports upload progress (0..1) when
+ * the browser exposes it. Rejects with a message that includes the server body. */
+export function uploadImage(file, serverName, onProgress) {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    form.append("image", file, serverName || file.name);
+    form.append("type", CONFIG.UPLOAD.type);
+    form.append("overwrite", "false");
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", serverBase + "/upload/image", true);
+    xhr.responseType = "text";
+    xhr.timeout = 120000;
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total);
+      };
+    }
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch { /* non-JSON body */ }
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error("HTTP " + xhr.status + " " + (xhr.statusText || "") +
+          (data ? "\n" + JSON.stringify(data, null, 2) : (xhr.responseText ? "\n" + xhr.responseText : ""))));
+      } else if (!data || !data.name) {
+        reject(new Error("Upload response missing a filename:\n" + xhr.responseText));
+      } else {
+        resolve(data);
+      }
+    };
+    xhr.onerror = () => reject(new Error("Upload failed — is ComfyUI reachable at " + serverBase + "?"));
+    xhr.ontimeout = () => reject(new Error("Upload timed out."));
+    xhr.send(form);
+  });
+}
+
+/** `subfolder/name` reference accepted by LoadImage for an uploaded image. */
+export function imageRef(data) {
+  return data.subfolder ? data.subfolder + "/" + data.name : data.name;
 }
 
 /* ============================================================================
@@ -355,22 +460,6 @@ export async function fetchQueue() {
     if (!res.ok) throw new Error("HTTP " + res.status);
     return await res.json();
   } finally {
-    clearTimeout(timer);
-  }
-}
-
-/** Cancel every pending (not-yet-running) job. */
-export async function clearQueue() {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 5000);
-  try {
-    await fetch(serverBase + "/queue", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ clear: true }),
-      signal: ctrl.signal,
-    });
-  } catch { /* best-effort */ } finally {
     clearTimeout(timer);
   }
 }

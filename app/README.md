@@ -14,10 +14,10 @@ app/
 └── js/
     ├── config.js   # All model filenames, node types, UI defaults, presets
     ├── api.js      # ComfyUI client: WS (reconnect+backoff), /prompt,
-    │               # /interrupt, /history, /view, /object_info validation,
-    │               # graph construction (verbatim from the verified prototype)
+    │               # /interrupt, /history, /view, /upload/image, /object_info
+    │               # validation, and the T2I + image-edit graph builders
     ├── ui.js       # DOM building, events, progress, gallery, metadata panel,
-    │               # localStorage persistence
+    │               # edit mode + reference uploads, localStorage persistence
     └── main.js     # Entry point — boots initUI()
 ```
 
@@ -36,9 +36,10 @@ It sends `Cache-Control: no-store`, so `styles.css` and the ES modules are
 never stale. With a plain `python -m http.server`, a hard reload
 (Ctrl/Cmd+Shift+R) may be needed because browsers heuristically cache assets.
 
-**ComfyUI must be running** at `http://127.0.0.1:8188` with
-`--enable-cors-header` enabled (the UI is served from a different origin;
-without the flag ComfyUI rejects cross-origin requests with HTTP 403), plus:
+**ComfyUI must be running** at `http://127.0.0.1:8188` with CORS enabled for the
+UI's origin, e.g. `--enable-cors-header http://127.0.0.1:8080` (the UI is served
+from a different origin; without the flag ComfyUI rejects cross-origin requests
+with HTTP 403, and a bare flag opens CORS to every site), plus:
 - `ComfyUI-GGUF` custom node installed
 - `models/unet/qwen_image_2.1_Q4_K_M.gguf`
 - `models/text_encoders/qwen3vl_8b_w4a8.safetensors`
@@ -52,15 +53,28 @@ and warns (verbatim, monospace) if any are missing.
 - **No `innerHTML` anywhere** — every server-derived or user-derived string is
   rendered via `textContent` / DOM APIs.
 - Meta **CSP** restricts `connect-src` / `img-src` to `'self'` and
-  `http://127.0.0.1:8188` (+ its `ws://` counterpart).
-  If you must open the page via `file://`, a commented-out relaxed CSP is
-  included in `index.html` (local static serving is strongly preferred).
-- `localStorage` holds only UI settings (prompt, size, steps, cfg, seed, seed-lock).
-  Nothing sensitive is ever persisted.
+  `http://127.0.0.1:8188` (+ its `ws://` counterpart; `blob:`/`data:` for local
+  upload previews) and adds `object-src 'none'` / `base-uri 'self'`. ES modules
+  require http(s), so serve the page from `scripts/serve_app.py` — opening
+  `index.html` via `file://` does not work.
+- **Uploads** are limited to raster images (PNG/JPEG/WebP/GIF/BMP) of ≤20 MB,
+  validated client-side before upload. Each file is sent under a random
+  `qwen21_ref_<id>.<ext>` name with `overwrite=false`, so it cannot overwrite an
+  existing ComfyUI input or escape its folder. Previews render in an `<img>`
+  only — uploaded files are never loaded as documents/HTML.
+- `localStorage` holds only UI settings (mode, prompt, edit instruction, negative
+  prompt, size, steps, cfg, seed, seed-lock, sampler, scheduler, denoise, batch).
+  Nothing sensitive is ever persisted; reference files are never stored.
 
 ## Features
 
 - Live server/device panel — GPU name, free/total VRAM, ComfyUI + PyTorch version
+- **Text → Image / Edit image** mode switch
+- **Image edit**: drag & drop, click-to-browse, or Ctrl·⌘+V paste up to 16
+  reference images (validated, thumbnailed, removable) plus an edit instruction;
+  reuses the size / steps / CFG / seed / advanced controls. References upload to
+  ComfyUI and drive `TextEncodeQwenImage21`'s autogrow `images` inputs; results
+  record the mode + references so Apply / Re-run restores the whole edit
 - Prompt, collapsible negative prompt, size presets + custom w/h
 - Steps slider (live value), CFG, seed with 🎲 randomize + 🔓 lock toggle
 - Advanced sampler / scheduler / denoise / batch controls, populated from the
