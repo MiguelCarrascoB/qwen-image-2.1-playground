@@ -5,3 +5,14 @@ __pycache__/
 *.log
 node_modules/
 .DS_Store
+
+# secrets / credentials — never commit these
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa*
+credentials.json

@@ -87,6 +87,8 @@ Main output, full size:
 
 ## License note
 
+The playground code in this repository is released under the **MIT License** — see [LICENSE](LICENSE).
+
 Qwen-Image-2.1 is released under the **Qwen Research License** — non-commercial use only unless you obtain a separate commercial license from Alibaba.
 
 ## Security notes
