@@ -68,5 +68,7 @@ and warns (verbatim, monospace) if any are missing.
 - Verbatim ComfyUI error display (monospace) with Copy / Dismiss
 - Connection status pill — click to retry; auto-reconnect with backoff;
   setup-hint banner when the server is unreachable
+- Reconciles with the server's live queue: flags a job still running on the GPU
+  after a reload (with a stop button) and recovers its result into the gallery
 - Accessible: ARIA live regions, focus-visible rings, `prefers-reduced-motion`
 - Last-used settings (incl. seed and advanced options) restored from `localStorage`

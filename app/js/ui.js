@@ -68,6 +68,9 @@ const state = {
   queuePollTimer: null,
   statsPollTimer: null,
   lastParams: null, // parameters actually submitted for the in-flight job
+  ownPromptIds: new Set(), // jobs this page submitted (never treated as foreign)
+  recoveredIds: new Set(), // foreign jobs already pulled into the gallery
+  busyPromptId: null, // foreign job currently running on the server
   gallery: [], // { filename, subfolder, type, prompt, seed, steps, width, height, elapsed, ts }
   selected: null,
 };
@@ -133,8 +136,15 @@ function renderStatus(connected, extra) {
     where + (extra ? " · " + extra : "") + " — click to retry";
   $("setupBanner").classList.toggle("visible", !connected);
   $("generateBtn").disabled = state.generating || !connected;
-  if (connected) refreshServerInfo();
-  else renderServerInfo(null);
+  if (connected) {
+    refreshServerInfo();
+    startQueuePoll();
+    refreshServerBusy();
+  } else {
+    stopQueuePoll();
+    clearServerBusy();
+    renderServerInfo(null);
+  }
 }
 
 function renderServerInfo(stats) {
@@ -220,6 +230,7 @@ function setControlsDisabled(disabled) {
 
 function setGenerating(on) {
   state.generating = on;
+  if (on) clearServerBusy();
   $("generateBtn").disabled = on || !conn.connected;
   $("cancelBtn").classList.toggle("visible", on);
   $("cancelBtn").disabled = false;
@@ -234,7 +245,6 @@ function setGenerating(on) {
     $("stepCounter").textContent = "";
     $("eta").textContent = "";
     setPhase("");
-    stopQueuePoll();
     if (state.historyFallbackTimer) { clearTimeout(state.historyFallbackTimer); state.historyFallbackTimer = null; }
     if (state.watchdogTimer) { clearTimeout(state.watchdogTimer); state.watchdogTimer = null; }
   }
@@ -289,23 +299,81 @@ function appendQueue(text) {
 }
 
 function startQueuePoll() {
-  stopQueuePoll();
+  if (state.queuePollTimer) return;
   updateQueue();
-  state.queuePollTimer = setInterval(updateQueue, 2000);
+  state.queuePollTimer = setInterval(updateQueue, 3000);
 }
 function stopQueuePoll() {
   if (state.queuePollTimer) { clearInterval(state.queuePollTimer); state.queuePollTimer = null; }
 }
+
 async function updateQueue() {
   if (!conn.connected) return;
   try {
     const q = await fetchQueue();
-    const running = (q.queue_running || []).length;
-    const pending = (q.queue_pending || []).length;
-    $("queuePosition").textContent = (running + pending)
-      ? "queue: " + pending + " pending, " + running + " running"
-      : "";
+    const running = q.queue_running || [];
+    const pending = q.queue_pending || [];
+    const total = running.length + pending.length;
+    if (state.generating) {
+      $("queuePosition").textContent = total
+        ? "queue: " + pending.length + " pending, " + running.length + " running"
+        : "";
+      return;
+    }
+    // Idle: surface a job this page did not start (e.g. a run that kept going
+    // after a reload, or another tab) so the user knows the GPU is active.
+    const first = running[0] || pending[0];
+    const pid = first && first[1];
+    if (total && pid && !state.ownPromptIds.has(pid)) {
+      setServerBusy(pid, running.length, pending.length);
+    } else if (total === 0 && state.busyPromptId) {
+      // The job we were tracking just left the queue — pull in its result.
+      recoverForeign(state.busyPromptId);
+    } else {
+      clearServerBusy();
+    }
   } catch { /* transient — ignore */ }
+}
+
+async function refreshServerBusy() { await updateQueue(); }
+
+function setServerBusy(promptId, running, pending) {
+  if (promptId) state.busyPromptId = promptId;
+  const bits = [];
+  if (running) bits.push(running + " running");
+  if (pending) bits.push(pending + " pending");
+  $("busyText").textContent = "ComfyUI is working on another job" +
+    (bits.length ? " (" + bits.join(", ") + ")" : "") +
+    " — the GPU may be active.";
+  $("busyNotice").classList.remove("hidden");
+}
+function clearServerBusy() {
+  state.busyPromptId = null;
+  $("busyNotice").classList.add("hidden");
+}
+
+/** Pull a foreign job's result into the gallery once it finishes. */
+async function recoverForeign(promptId, images) {
+  if (!promptId || state.recoveredIds.has(promptId) || state.generating) return;
+  state.recoveredIds.add(promptId);
+  clearServerBusy();
+  const imgs = (images && images.length) ? images : await fetchHistoryImages(promptId);
+  if (imgs && imgs.length && !state.generating) {
+    addGalleryItems(imgs, undefined);
+    announce("Recovered a result from a job that finished after the page reloaded");
+  }
+}
+
+/** Reset all run-related UI. Called on load and on bfcache restore so a
+ * reloaded page never shows a stale "generating" state. */
+function resetRunUI() {
+  setGenerating(false);
+  stopElapsedTimer();
+  state.currentPromptId = null;
+  state.stepValue = 0;
+  setProgress(0, true);
+  $("stepCounter").textContent = "";
+  $("eta").textContent = "";
 }
 
 function finishGeneration() {
@@ -322,6 +390,17 @@ function finishGeneration() {
 function onServerMessage(msg) {
   const d = msg.data || {};
   const mine = (id) => !id || id === state.currentPromptId;
+
+  // A job this page did not submit (kept running across a reload, or another
+  // tab) — surface it instead of silently ignoring the events.
+  const fid = d.prompt_id;
+  const foreign = !!(fid && fid !== state.currentPromptId && !state.ownPromptIds.has(fid));
+  if (foreign && !state.generating &&
+      (msg.type === "execution_start" ||
+       (msg.type === "executing" && d.node !== null) ||
+       msg.type === "progress")) {
+    setServerBusy(fid, null, null);
+  }
 
   switch (msg.type) {
     case "status": {
@@ -371,6 +450,8 @@ function onServerMessage(msg) {
         addGalleryItems(d.output.images, performance.now() - state.startTime);
         announce("Generation complete");
         finishGeneration();
+      } else if (foreign && d.output && d.output.images) {
+        recoverForeign(fid, d.output.images);
       }
       break;
     }
@@ -379,6 +460,8 @@ function onServerMessage(msg) {
         showError("ComfyUI execution error:\n" + JSON.stringify(d, null, 2));
         announce("Generation failed");
         finishGeneration();
+      } else if (foreign) {
+        clearServerBusy();
       }
       break;
     }
@@ -387,9 +470,12 @@ function onServerMessage(msg) {
         showError("Execution was interrupted.");
         announce("Generation cancelled");
         finishGeneration();
+      } else if (foreign) {
+        clearServerBusy();
       }
       break;
     case "execution_success":
+      if (foreign) recoverForeign(fid);
       break;
   }
 }
@@ -463,7 +549,7 @@ function showInViewer(item, focusViewer = false) {
       el("span", { class: "meta-k", text: "Steps" }),  el("span", { text: String(item.steps) }),
       el("span", { class: "meta-k", text: "CFG" }),    el("span", { text: String(item.cfg) }),
       el("span", { class: "meta-k", text: "Size" }),   el("span", { text: item.width + "×" + item.height }),
-      el("span", { class: "meta-k", text: "Time" }),   el("span", { text: (item.elapsed / 1000).toFixed(1) + "s" }),
+      el("span", { class: "meta-k", text: "Time" }),   el("span", { text: Number.isFinite(item.elapsed) ? (item.elapsed / 1000).toFixed(1) + "s" : "— (recovered)" }),
       el("span", { class: "meta-k", text: "File" }),   el("span", { class: "mono", text: item.filename }),
     ),
   );
@@ -486,7 +572,8 @@ function showInViewer(item, focusViewer = false) {
   meta.append(actions);
   viewer.append(meta);
 
-  $("viewerBadge").textContent = item.width + "×" + item.height + " · " + (item.elapsed / 1000).toFixed(1) + "s";
+  $("viewerBadge").textContent = item.width + "×" + item.height + " · " +
+    (Number.isFinite(item.elapsed) ? (item.elapsed / 1000).toFixed(1) + "s" : "recovered");
 
   for (const t of $("gallery").querySelectorAll(".thumb")) {
     const on = t.dataset.filename === item.filename && t.dataset.ts === String(item.ts);
@@ -514,7 +601,7 @@ function addGalleryItems(images, elapsedMs) {
     cfg: p.cfg !== undefined ? p.cfg : $("cfg").value,
     width: p.width !== undefined ? p.width : $("width").value,
     height: p.height !== undefined ? p.height : $("height").value,
-    elapsed: elapsedMs,
+    elapsed: (elapsedMs === undefined ? null : elapsedMs),
     ts: Date.now() + Math.random(),
   }));
   for (const item of items) state.gallery.unshift(item);
@@ -656,6 +743,7 @@ async function generate() {
   try {
     const { promptId } = await submitPrompt(graph);
     state.currentPromptId = promptId;
+    state.ownPromptIds.add(promptId);
     setPhase("queued (prompt_id " + promptId.slice(0, 8) + "…)");
   } catch (e) {
     showError("Failed to submit workflow:\n" + (e.message || e));
@@ -822,6 +910,16 @@ function wireEvents() {
   // Gallery actions
   $("galleryClearBtn").addEventListener("click", clearGallery);
 
+  // Server-busy notice: stop a job this page did not start.
+  $("busyCancel").addEventListener("click", async () => {
+    const id = state.busyPromptId;
+    $("busyText").textContent = "Stopping server job…";
+    await interrupt(id);
+    await cancelQueued(id);
+    clearServerBusy();
+    updateQueue();
+  });
+
   // Size inputs
   $("width").addEventListener("input", syncPresetFromInputs);
   $("height").addEventListener("input", syncPresetFromInputs);
@@ -897,9 +995,18 @@ export function initUI() {
   buildSizePresets();
   initInputs();
   wireEvents();
+  resetRunUI(); // never start in a stale "generating" state
   renderStatus(false);
   $("viewer").setAttribute("tabindex", "-1");
   startStatsPolling();
+  // A back/forward-cache restore can bring back a DOM that still shows the
+  // previous run; reset it and re-sync with the server.
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted) {
+      resetRunUI();
+      checkConnection();
+    }
+  });
   checkConnection().then((res) => {
     if (!res) return;
     const notes = [];

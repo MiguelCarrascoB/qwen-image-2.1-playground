@@ -52,6 +52,8 @@ Dependency-free (vanilla HTML/CSS/ES modules), dark theme, responsive:
   running *or* still-queued job
 - Result viewer with **Open / Copy prompt / Apply / Re-run / Download** actions
 - Session **gallery** with lazy WebP thumbnails, per-image delete and clear
+- Reconciles with the live queue on reload: flags a job still running on the GPU
+  (with a stop button) and recovers its result
 - Accessible: ARIA live regions, focus-visible rings, `prefers-reduced-motion`
 
 ## Which quant fits your machine

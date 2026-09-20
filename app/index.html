@@ -44,6 +44,13 @@
     <button class="banner-btn" id="bannerRetry" type="button">Retry</button>
   </div>
 
+  <!-- Shown when ComfyUI is executing a job this page did not start -->
+  <div class="busy-notice hidden" id="busyNotice" role="status" aria-live="polite">
+    <span class="busy-dot" aria-hidden="true"></span>
+    <span id="busyText"></span>
+    <button class="mini-btn" id="busyCancel" type="button">Stop server job</button>
+  </div>
+
   <div class="layout">
 
     <!-- ============ LEFT: controls ============ -->

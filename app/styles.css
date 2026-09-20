@@ -176,6 +176,29 @@ header h1 span { color: var(--muted); font-weight: 400; font-size: 13px; margin-
 }
 .banner-btn:hover { background: rgba(252, 211, 77, 0.12); }
 
+/* ------------------------------------------------------- server-busy notice */
+.busy-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px clamp(16px, 2.2vw, 32px) 0;
+  padding: 10px 14px;
+  background: var(--panel2);
+  border: 1px solid var(--accent-ring);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 12.5px;
+}
+.busy-notice .mini-btn { margin-left: auto; flex-shrink: 0; }
+.busy-dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+  animation: pulse 1.2s ease-in-out infinite;
+  flex-shrink: 0;
+}
+
 /* ------------------------------------------------------------------ layout */
 .layout {
   display: grid;
