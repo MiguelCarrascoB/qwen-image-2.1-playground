@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!--
+    Content Security Policy:
+    - 'self' covers same-origin assets when served over http.
+    - http://127.0.0.1:8188 is allowed for connect-src (fetch + WS) and img-src
+      (the /view image endpoints).
+    - NOTE: when opening this page directly from disk (file://), the 'self'
+      origin is "null" and module scripts may be blocked by the browser. If you
+      must run from file:// (a local static server is strongly preferred),
+      relax CSP by commenting the line below and uncommenting the alternative.
+  -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' http://127.0.0.1:8188 data:; connect-src 'self' http://127.0.0.1:8188 ws://127.0.0.1:8188">
+  <!-- file:// fallback (relaxed) — only use if you really must skip a local server:
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self' file:; script-src 'self' file: 'unsafe-inline'; style-src 'self' file: 'unsafe-inline'; img-src * data:; connect-src *">
+  -->
+
+  <title>Qwen-Image-2.1 — ComfyUI Playground</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <header>
+    <h1>Qwen-Image-2.1 <span>via local ComfyUI · GGUF</span></h1>
+    <button class="pill" id="statusPill" type="button" title="Click to retry connection">
+      <span class="dot"></span>
+      <span id="statusText">Connecting…</span>
+    </button>
+  </header>
+
+  <!-- Setup hint banner: shown whenever the server is unreachable -->
+  <div class="setup-banner" id="setupBanner">
+    <div class="banner-text">
+      <strong>ComfyUI not reachable at 127.0.0.1:8188.</strong>
+      Start it, e.g. <code>python main.py --listen 127.0.0.1 --port 8188</code>,
+      then click retry.
+    </div>
+    <button class="banner-btn" id="bannerRetry" type="button">Retry</button>
+  </div>
+
+  <div class="layout">
+
+    <!-- ============ LEFT: controls ============ -->
+    <aside class="panel controls">
+      <h2>Prompt</h2>
+
+      <label for="prompt">Prompt</label>
+      <textarea id="prompt" placeholder="A cozy cabin in a snowy forest at dusk…"></textarea>
+
+      <div class="collapsible">
+        <button class="collapsible-head" id="negToggle" type="button" aria-expanded="false" aria-controls="negBody">
+          <span class="chev">▸</span> Negative prompt
+        </button>
+        <div class="collapsible-body" id="negBody">
+          <textarea id="negPrompt" placeholder="blurry, low quality…"></textarea>
+        </div>
+      </div>
+
+      <label>Size</label>
+      <div class="chips" id="sizePresets"></div>
+      <div class="row custom-size-row" id="customSizeRow">
+        <div>
+          <label for="width">Width</label>
+          <input type="number" id="width" min="512" max="2048" step="64" value="1024">
+        </div>
+        <div>
+          <label for="height">Height</label>
+          <input type="number" id="height" min="512" max="2048" step="64" value="1024">
+        </div>
+      </div>
+      <div class="hint">512 – 2048 · multiples of 64 recommended</div>
+
+      <label for="steps">Steps <span class="slider-val" id="stepsVal">40</span></label>
+      <input type="range" id="steps" min="1" max="100" value="40" step="1">
+
+      <div class="row">
+        <div>
+          <label for="cfg">CFG</label>
+          <input type="number" id="cfg" min="1" max="20" step="0.5" value="1">
+        </div>
+        <div>
+          <label for="seed">Seed</label>
+          <input type="number" id="seed" min="0" value="42">
+        </div>
+      </div>
+      <div class="seed-actions">
+        <button class="icon-btn" id="randomizeBtn" type="button" title="Randomize seed">🎲</button>
+        <button class="icon-btn lock" id="lockSeed" type="button" title="Seed unlocked — new random seed per generation">🔓</button>
+      </div>
+
+      <button class="btn generate" id="generateBtn" type="button">Generate</button>
+      <button class="btn cancel" id="cancelBtn" type="button">Cancel</button>
+
+      <div class="progress-box" id="progressBox">
+        <div class="progress-top">
+          <div class="spinner"></div>
+          <span id="elapsed">0.0s</span>
+          <span class="phase" id="phase"></span>
+        </div>
+        <div class="progress-bar"><div id="progressFill"></div></div>
+        <div class="queue-status" id="queueStatus"></div>
+      </div>
+
+      <div class="error-box" id="errorBox"></div>
+    </aside>
+
+    <!-- ============ RIGHT: viewer + gallery ============ -->
+    <section class="results">
+      <div class="panel viewer">
+        <h2>Result</h2>
+        <div id="viewer">
+          <div class="placeholder" id="placeholder">
+            <svg width="96" height="96" viewBox="0 0 96 96" aria-hidden="true">
+              <rect width="96" height="96" rx="12" fill="var(--panel2)"/>
+              <path d="M20 68 L40 44 L54 58 L66 46 L78 68 Z" fill="var(--border)"/>
+              <circle cx="64" cy="30" r="8" fill="var(--border)"/>
+              <path d="M20 68 L40 44 L54 58 L66 46 L78 68" stroke="var(--accent)" stroke-width="2" fill="none" stroke-linejoin="round"/>
+            </svg>
+            <div>Configure your prompt and hit <strong>Generate</strong>.<br>Images appear here.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel gallery-panel hidden" id="galleryPanel">
+        <h2>Session gallery</h2>
+        <div class="gallery" id="gallery"></div>
+      </div>
+    </section>
+
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
