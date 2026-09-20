@@ -24,8 +24,9 @@ What it does (≈11 GB downloads):
 ## Run
 
 ```bash
-./scripts/start_comfyui_mac.sh   # ComfyUI on http://127.0.0.1:8188
-open app/index.html              # the playground UI
+./scripts/start_comfyui_mac.sh           # ComfyUI on http://127.0.0.1:8188 (CORS enabled)
+cd app && python3 -m http.server 8080    # serve the playground UI
+# then open http://127.0.0.1:8080
 ```
 
 First generation after a server start is slow (~2 min: GGUF dequant + 6 GB text

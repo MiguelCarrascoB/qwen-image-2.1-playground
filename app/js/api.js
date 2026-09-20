@@ -16,7 +16,11 @@ export const serverBase = CONFIG.SERVER.replace(/\/$/, "");
 
 export const conn = {
   ws: null,
-  clientId: crypto.randomUUID(),
+  // crypto.randomUUID() only exists in secure contexts (https / localhost).
+  // Fall back so the whole app still boots when served over plain http.
+  clientId: (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+    ? globalThis.crypto.randomUUID()
+    : "c" + Math.random().toString(36).slice(2) + Date.now().toString(36),
   connected: false,
   objectInfo: null,
   /** Set of callbacks (connected:boolean, extra?:string) => void */
@@ -52,13 +56,19 @@ function scheduleReconnect() {
   if (wsIntentionalClose || wsReconnectTimer) return;
   wsReconnectTimer = setTimeout(() => {
     wsReconnectTimer = null;
-    connectWs();
+    // Re-validate /object_info as well as the socket. Only checkConnection()
+    // sets conn.objectInfo, so a socket-only reconnect would leave the UI
+    // "Disconnected" forever after a transient outage.
+    checkConnection();
   }, wsBackoffMs);
   wsBackoffMs = Math.min(WS_BACKOFF_MAX_MS, wsBackoffMs * 2);
 }
 
 function connectWs() {
   if (wsIntentionalClose) return;
+  // Never stack sockets: an OPEN/CONNECTING socket already feeds handlers.
+  if (conn.ws && (conn.ws.readyState === WebSocket.OPEN ||
+                  conn.ws.readyState === WebSocket.CONNECTING)) return;
   try {
     conn.ws = new WebSocket(wsUrl());
   } catch (e) {
@@ -71,6 +81,7 @@ function connectWs() {
     // The status pill is driven by object_info; WS open alone is enough to
     // show "connected" only if object_info already succeeded.
     if (conn.objectInfo) emitStatus(true);
+    else checkConnection(); // server came up after the last /object_info attempt
   };
   conn.ws.onclose = () => {
     emitStatus(false);
@@ -97,7 +108,17 @@ const messageHandlers = new Set();
  * status-pill retry click. */
 export function reconnectNow() {
   if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
-  if (conn.ws) { try { conn.ws.close(); } catch { /* already closed */ } }
+  // Tear down the old socket without letting its onclose schedule a competing
+  // reconnect, then re-validate /object_info (which reopens the WS).
+  wsIntentionalClose = true;
+  if (conn.ws) {
+    conn.ws.onopen = null;
+    conn.ws.onmessage = null;
+    conn.ws.onerror = null;
+    conn.ws.onclose = null;
+    try { conn.ws.close(); } catch { /* already closed */ }
+    conn.ws = null;
+  }
   wsIntentionalClose = false;
   wsBackoffMs = 1000;
   checkConnection(); // re-validate object_info + reopen WS
@@ -180,7 +201,7 @@ export function buildGraph(p) {
   });
 
   // Latent — see CONFIG.EMPTY_LATENT_TYPE note re: 16ch vs 64ch variants.
-  add("latent", CONFIG.EMPTY_LATENT_TYPE, { width: p.width, height: p.height, batch_size: 1 });
+  add("latent", CONFIG.EMPTY_LATENT_TYPE, { width: p.width, height: p.height, batch_size: p.batch || 1 });
 
   // Optional CFGNorm between model and sampler
   let modelRef = ["unet", 0];
@@ -194,9 +215,9 @@ export function buildGraph(p) {
     seed: p.seed,
     steps: p.steps,
     cfg: p.cfg,
-    sampler_name: CONFIG.SAMPLER_NAME,
-    scheduler: CONFIG.SCHEDULER,
-    denoise: CONFIG.DENOISE,
+    sampler_name: p.sampler || CONFIG.SAMPLER_NAME,
+    scheduler: p.scheduler || CONFIG.SCHEDULER,
+    denoise: (p.denoise === undefined ? CONFIG.DENOISE : p.denoise),
     model: modelRef,
     positive: ["enc", 0],
     negative: ["enc", 1],
@@ -225,15 +246,18 @@ export async function submitPrompt(graph) {
       body: JSON.stringify({ prompt: graph, client_id: conn.clientId }),
       signal: ctrl.signal,
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* non-JSON body (proxy/HTML error) */ }
 
-    if (!res.ok || data.error) {
+    if (!res.ok || !data || data.error) {
       // ComfyUI returns {error: {...}, node_errors: {...}} on rejection.
-      const msg = data.error
+      const msg = (data && data.error)
         ? JSON.stringify(data, null, 2)
-        : "HTTP " + res.status + " " + (res.statusText || "");
+        : "HTTP " + res.status + " " + (res.statusText || "") + (text ? "\n" + text : "");
       throw new Error(msg);
     }
+    if (!data.prompt_id) throw new Error("Server did not return a prompt_id:\n" + text);
     return { promptId: data.prompt_id };
   } finally {
     clearTimeout(timer);
@@ -241,11 +265,33 @@ export async function submitPrompt(graph) {
 }
 
 /** Ask the server to interrupt the currently running prompt. */
-export async function interrupt() {
+export async function interrupt(promptId) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 5000);
   try {
-    await fetch(serverBase + "/interrupt", { method: "POST", signal: ctrl.signal });
+    await fetch(serverBase + "/interrupt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(promptId ? { prompt_id: promptId } : {}),
+      signal: ctrl.signal,
+    });
+  } catch { /* best-effort */ } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Remove a queued (not-yet-running) job by prompt id. */
+export async function cancelQueued(promptId) {
+  if (!promptId) return;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    await fetch(serverBase + "/queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delete: [promptId] }),
+      signal: ctrl.signal,
+    });
   } catch { /* best-effort */ } finally {
     clearTimeout(timer);
   }
@@ -282,6 +328,53 @@ export function viewUrl(img) {
     "&type=" + encodeURIComponent(img.type || "output");
 }
 
+/** Thumbnail URL for gallery tiles (ComfyUI renders a downscaled webp/jpeg). */
+export function previewUrl(img, format = "webp", quality = 80) {
+  return viewUrl(img) + "&preview=" + format + ";" + quality;
+}
+
+/** GET /system_stats — device + version info for the status panel. */
+export async function fetchSystemStats() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(serverBase + "/system_stats", { signal: ctrl.signal });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** GET /queue — { queue_running: [...], queue_pending: [...] }. */
+export async function fetchQueue() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    const res = await fetch(serverBase + "/queue", { signal: ctrl.signal });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Cancel every pending (not-yet-running) job. */
+export async function clearQueue() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    await fetch(serverBase + "/queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clear: true }),
+      signal: ctrl.signal,
+    });
+  } catch { /* best-effort */ } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Download an image by fetching it as a blob (works on file:// too, where
  * cross-origin download names are unreliable). */
 export async function downloadImage(img) {
@@ -295,7 +388,8 @@ export async function downloadImage(img) {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(a.href);
+    // Give the browser time to start reading the blob before revoking it.
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   } catch {
     window.open(url, "_blank");
   }

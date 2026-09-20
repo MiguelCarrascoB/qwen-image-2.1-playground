@@ -10,18 +10,14 @@
     - http://127.0.0.1:8188 is allowed for connect-src (fetch + WS) and img-src
       (the /view image endpoints).
     - NOTE: when opening this page directly from disk (file://), the 'self'
-      origin is "null" and module scripts may be blocked by the browser. If you
-      must run from file:// (a local static server is strongly preferred),
-      relax CSP by commenting the line below and uncommenting the alternative.
+      origin is "null" and module scripts may be blocked by the browser. Serve
+      it from a local static server instead of opening the file directly.
   -->
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' http://127.0.0.1:8188 data:; connect-src 'self' http://127.0.0.1:8188 ws://127.0.0.1:8188">
-  <!-- file:// fallback (relaxed) — only use if you really must skip a local server:
-  <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self' file:; script-src 'self' file: 'unsafe-inline'; style-src 'self' file: 'unsafe-inline'; img-src * data:; connect-src *">
-  -->
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' http://127.0.0.1:8188 data: blob:; connect-src 'self' http://127.0.0.1:8188 ws://127.0.0.1:8188">
 
   <title>Qwen-Image-2.1 — ComfyUI Playground</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -29,16 +25,20 @@
   <header>
     <h1>Qwen-Image-2.1 <span>via local ComfyUI · GGUF</span></h1>
     <button class="pill" id="statusPill" type="button" title="Click to retry connection">
-      <span class="dot"></span>
-      <span id="statusText">Connecting…</span>
+      <span class="dot" aria-hidden="true"></span>
+      <span id="statusText" role="status" aria-live="polite">Connecting…</span>
     </button>
   </header>
 
+  <!-- Screen-reader-only live region for coarse state transitions -->
+  <div class="sr-only" id="liveStatus" role="status" aria-live="polite"></div>
+
   <!-- Setup hint banner: shown whenever the server is unreachable -->
-  <div class="setup-banner" id="setupBanner">
+  <div class="setup-banner" id="setupBanner" role="alert">
     <div class="banner-text">
       <strong>ComfyUI not reachable at 127.0.0.1:8188.</strong>
-      Start it, e.g. <code>python main.py --listen 127.0.0.1 --port 8188</code>,
+      Start it, e.g.
+      <code>python main.py --listen 127.0.0.1 --port 8188 --enable-cors-header</code>,
       then click retry.
     </div>
     <button class="banner-btn" id="bannerRetry" type="button">Retry</button>
@@ -47,18 +47,30 @@
   <div class="layout">
 
     <!-- ============ LEFT: controls ============ -->
-    <aside class="panel controls">
+    <aside class="panel controls" id="controls">
       <h2>Prompt</h2>
+
+      <details class="server-card" id="serverInfo" open>
+        <summary>Server <span class="server-badge" id="serverBadge">—</span></summary>
+        <div class="server-body">
+          <div class="server-row"><span class="server-k">GPU</span><span id="deviceName">—</span></div>
+          <div class="server-row"><span class="server-k">VRAM</span><span id="vramInfo">—</span></div>
+          <div class="server-row"><span class="server-k">Model</span><span id="modelName">—</span></div>
+          <div class="server-row"><span class="server-k">Build</span><span id="comfyVersion">—</span></div>
+        </div>
+      </details>
 
       <label for="prompt">Prompt</label>
       <textarea id="prompt" placeholder="A cozy cabin in a snowy forest at dusk…"></textarea>
 
       <div class="collapsible">
         <button class="collapsible-head" id="negToggle" type="button" aria-expanded="false" aria-controls="negBody">
-          <span class="chev">▸</span> Negative prompt
+          <span class="chev" aria-hidden="true">▸</span> Negative prompt
         </button>
         <div class="collapsible-body" id="negBody">
-          <textarea id="negPrompt" placeholder="blurry, low quality…"></textarea>
+          <div class="collapsible-inner">
+            <textarea id="negPrompt" placeholder="blurry, low quality…"></textarea>
+          </div>
         </div>
       </div>
 
@@ -91,29 +103,70 @@
       </div>
       <div class="seed-actions">
         <button class="icon-btn" id="randomizeBtn" type="button" title="Randomize seed">🎲</button>
-        <button class="icon-btn lock" id="lockSeed" type="button" title="Seed unlocked — new random seed per generation">🔓</button>
+        <button class="icon-btn lock" id="lockSeed" type="button" aria-pressed="false" title="Seed unlocked — new random seed per generation">🔓</button>
       </div>
 
-      <button class="btn generate" id="generateBtn" type="button">Generate</button>
-      <button class="btn cancel" id="cancelBtn" type="button">Cancel</button>
+      <div class="collapsible advanced">
+        <button class="collapsible-head" id="advToggle" type="button" aria-expanded="false" aria-controls="advBody">
+          <span class="chev" aria-hidden="true">▸</span> Advanced
+        </button>
+        <div class="collapsible-body" id="advBody">
+          <div class="collapsible-inner">
+            <label for="sampler">Sampler</label>
+            <select id="sampler"></select>
 
-      <div class="progress-box" id="progressBox">
+            <label for="scheduler">Scheduler</label>
+            <select id="scheduler"></select>
+
+            <div class="row">
+              <div>
+                <label for="denoise">Denoise</label>
+                <input type="number" id="denoise" min="0" max="1" step="0.01" value="1">
+              </div>
+              <div>
+                <label for="batch">Batch</label>
+                <input type="number" id="batch" min="1" max="16" step="1" value="1">
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <button class="btn generate" id="generateBtn" type="button" aria-keyshortcuts="Control+Enter Meta+Enter">Generate</button>
+      <button class="btn cancel" id="cancelBtn" type="button" aria-keyshortcuts="Escape">Cancel</button>
+
+      <div class="progress-box" id="progressBox" aria-busy="false">
         <div class="progress-top">
-          <div class="spinner"></div>
+          <div class="spinner" aria-hidden="true"></div>
           <span id="elapsed">0.0s</span>
+          <span class="step-counter" id="stepCounter"></span>
+          <span class="eta" id="eta"></span>
           <span class="phase" id="phase"></span>
         </div>
-        <div class="progress-bar"><div id="progressFill"></div></div>
+        <div class="progress-bar" id="progressBar" role="progressbar"
+             aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="progressFill"></div>
+        </div>
         <div class="queue-status" id="queueStatus"></div>
+        <div class="queue-position" id="queuePosition"></div>
       </div>
 
-      <div class="error-box" id="errorBox"></div>
+      <div class="error-box" id="errorBox" role="alert" aria-live="assertive" tabindex="-1">
+        <div class="error-body" id="errorBody"></div>
+        <div class="error-actions">
+          <button class="mini-btn" id="errorCopy" type="button">Copy</button>
+          <button class="mini-btn" id="errorDismiss" type="button">Dismiss</button>
+        </div>
+      </div>
     </aside>
 
     <!-- ============ RIGHT: viewer + gallery ============ -->
     <section class="results">
       <div class="panel viewer">
-        <h2>Result</h2>
+        <div class="viewer-head">
+          <h2>Result</h2>
+          <span class="viewer-badge" id="viewerBadge"></span>
+        </div>
         <div id="viewer">
           <div class="placeholder" id="placeholder">
             <svg width="96" height="96" viewBox="0 0 96 96" aria-hidden="true">
@@ -123,13 +176,25 @@
               <path d="M20 68 L40 44 L54 58 L66 46 L78 68" stroke="var(--accent)" stroke-width="2" fill="none" stroke-linejoin="round"/>
             </svg>
             <div>Configure your prompt and hit <strong>Generate</strong>.<br>Images appear here.</div>
+            <div class="placeholder-tip"><kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>Enter</kbd> to generate</div>
           </div>
+        </div>
+        <div class="viewer-overlay hidden" id="viewerOverlay" aria-hidden="true">
+          <div class="spinner"></div>
+          <span>Generating…</span>
         </div>
       </div>
 
       <div class="panel gallery-panel hidden" id="galleryPanel">
-        <h2>Session gallery</h2>
+        <div class="gallery-head">
+          <h2>Session gallery</h2>
+          <div class="gallery-tools">
+            <span id="galleryCount">0 images</span>
+            <button class="mini-btn" id="galleryClearBtn" type="button">Clear</button>
+          </div>
+        </div>
         <div class="gallery" id="gallery"></div>
+        <div class="gallery-empty" id="galleryEmpty">No images in this session yet.</div>
       </div>
     </section>
 

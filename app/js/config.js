@@ -26,9 +26,10 @@ export const CONFIG = {
   VAE_LOADER_TYPE: "VAELoader",
 
   // --- Latent node ----------------------------------------------------------
-  // "EmptyLatentImage" is what the verified working graph uses for
-  // Qwen-Image-2.1 (the official template used it, and the smoke test
-  // generation succeeded with it). width/height/batch_size pass through.
+  // ComfyUI's official Qwen-Image-2.1 T2I template uses EmptyLatentImage. The
+  // model's internal latent is 64-channel at 16x downscale, but ComfyUI's
+  // fix_empty_latent_channels() pads/rescales the empty 4-channel latent
+  // automatically (all zeros), so EmptyLatentImage is correct here.
   EMPTY_LATENT_TYPE: "EmptyLatentImage",
 
   // --- Sampler / encode / decode / save ------------------------------------
@@ -55,6 +56,10 @@ export const CONFIG = {
     steps: 40,
     cfg: 1,
     seed: 42,
+    sampler: "euler",
+    scheduler: "simple",
+    denoise: 1.0,
+    batch: 1,
   },
 
   // --- UI constants ---------------------------------------------------------

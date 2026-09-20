@@ -48,11 +48,13 @@ git clone https://github.com/ltdrdata/ComfyUI-Manager.git custom_nodes\ComfyUI-M
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
 :: expect: 2.9.1+rocm7.2.1 / True / AMD Radeon RX 7900 XTX
 
-:: Launch
-python main.py --port 8188 --use-pytorch-cross-attention
+:: Launch (--enable-cors-header is required by the web UI, which is served
+:: from a different local origin)
+python main.py --port 8188 --use-pytorch-cross-attention --enable-cors-header
 ```
 
-Then open `app/index.html`.
+Then serve `app/` over http (`cd app && python -m http.server 8080`) and open
+`http://127.0.0.1:8080`.
 
 ## Model weights (24 GB VRAM plan)
 
@@ -69,6 +71,26 @@ loads). Fits in 24 GB with room for 1536–2048 px renders; `Q8_0` DiT also fits
 No `--lowvram` flags should be needed. If you prefer to skip GGUF entirely, the
 Comfy-native quant pair (`qwen_image_2.1_int8_convrot.safetensors` + `qwen3vl_8b_int8_convrot.safetensors`)
 goes into `models/diffusion_models/` and `models/text_encoders/`.
+
+## Verified environment / results
+
+First verified real GPU generation on Windows + ROCm:
+
+| Item | Version |
+|---|---|
+| GPU | AMD Radeon RX 7900 XTX 24 GB (25.7 GB VRAM reported) |
+| Driver | 32.0.31041.1004 |
+| Python | 3.12.3 |
+| ComfyUI | 0.37.0 (+ `ComfyUI-GGUF`) |
+| PyTorch | 2.9.1+rocm7.2.1 (ROCm 7.2.1 Windows wheels, `repo.radeon.com`) |
+
+- **Smoke test** — prompt "a red apple on a wooden table, studio light",
+  512×512, 8 steps, CFG 1.0, seed 42, sampler `euler` / scheduler `simple`,
+  GGUF `Q4_K_M` DiT + `qwen3vl_8b_w4a8` text encoder + `qwen_image_2.1_vae_bf16`.
+- **Result** — total wall time **18.1 s** on the first (cold) run, including
+  ~14 s of one-time model loading; steady-state sampler ~**0.6 s/step** at
+  512×512. No errors. Output `qwen21_00001_.png`.
+- **Launch** — `python main.py --port 8188 --enable-cors-header --use-pytorch-cross-attention`.
 
 ## Why not ZLUDA / DirectML (2026 status)
 
@@ -91,3 +113,8 @@ goes into `models/diffusion_models/` and `models/text_encoders/`.
 5. Keep ComfyUI updated same-day; Qwen-Image-2.1 loaders landed days before this guide.
 6. The `Comfy-Org/Qwen-Image-2.1` repo was still being reorganized at write time —
    re-check exact filenames before downloading.
+7. **Hugging Face CDN stalls**: `huggingface.co`'s CDN (`us.aws.cdn.hf.co`) hung
+   while downloading the weights. Downloading via
+   `https://hf-mirror.com/<repo>/resolve/main/<path>` worked and was fast. Also,
+   when the app path contains a space, background download helpers may mishandle
+   it — run them from a properly-quoted shell.

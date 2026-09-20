@@ -20,8 +20,39 @@ Local image generation with [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Imag
 1. Install + download weights (~11 GB):
    - **macOS:** `./scripts/setup_mac.sh` — full guide: [docs/MACOS.md](docs/MACOS.md)
    - **Windows 11 + RX 7900 XTX:** official ComfyUI Desktop or portable (AMD ROCm auto-selected) — full guide: [docs/WINDOWS_AMD.md](docs/WINDOWS_AMD.md)
-2. Start ComfyUI on port 8188 (macOS: `./scripts/start_comfyui_mac.sh`).
-3. Open `app/index.html` in a browser and generate (⌘/Ctrl+Enter). The page validates node availability against the running server and shows ComfyUI errors verbatim.
+2. Start ComfyUI on port 8188 with CORS enabled (macOS:
+   `./scripts/start_comfyui_mac.sh`; Windows:
+   `python main.py --port 8188 --use-pytorch-cross-attention --enable-cors-header`).
+   The UI is served from a different origin, so `--enable-cors-header` is required.
+3. Serve `app/` over http and open it, e.g. `cd app && python -m http.server 8080`,
+   then browse to `http://127.0.0.1:8080`. Generate with ⌘/Ctrl+Enter. The page
+   validates node availability against the running server and shows ComfyUI
+   errors verbatim.
+
+> **Verified on Windows + ROCm:** first real GPU generation on an **RX 7900 XTX
+> 24 GB** (Windows 11, torch 2.9.1+rocm7.2.1, ComfyUI 0.37.0, Python 3.12.3) —
+> 512×512, 8 steps in ~18.1 s cold including ~14 s of one-time model loading
+> (~0.6 s/step steady-state), no errors. Full details:
+> [docs/WINDOWS_AMD.md](docs/WINDOWS_AMD.md). As noted above, the UI runs from a
+> different origin, so `--enable-cors-header` is required on the ComfyUI command
+> line.
+
+## Playground UI
+
+![Playground UI](docs/images/playground_ui.png)
+
+Dependency-free (vanilla HTML/CSS/ES modules), dark theme, responsive:
+
+- Live **server panel**: GPU name, free/total VRAM, ComfyUI + PyTorch version
+- Prompt + collapsible negative prompt; size presets or custom W/H; steps, CFG,
+  seed with lock and randomize
+- **Advanced** sampler / scheduler / denoise / batch controls, populated from the
+  server's `/object_info` enums (euler + simple by default for Qwen-Image-2.1)
+- Step counter, **ETA**, monotonic progress bar, live queue position; cancel a
+  running *or* still-queued job
+- Result viewer with **Open / Copy prompt / Apply / Re-run / Download** actions
+- Session **gallery** with lazy WebP thumbnails, per-image delete and clear
+- Accessible: ARIA live regions, focus-visible rings, `prefers-reduced-motion`
 
 ## Which quant fits your machine
 
@@ -40,6 +71,7 @@ All runs use euler / simple / cfg 1.0 (FLUX-style), negative prompt empty.
 | 1 | ![Apple smoke](docs/images/apple_gguf_smoke_512.png) | a red apple | 512×512 | 8 | M4 Pro, 48 GB | MPS, GGUF Q4_K_M | 42 | ~116 s (incl. first model load) |
 | 2 | (graph validation render, not archived) | an orange cat sitting on a yellow bookshelf | 512×512 | 8 | M4 Pro, 48 GB | MPS, GGUF Q4_K_M | 42 | ~56 s |
 | 3 | ![Bookshop cafe](docs/images/qwen21_demo_00001_.png) | cozy bookshop cafe…chalkboard reads "QWEN IMAGE 2.1" | 1024×1024 | 40 | M4 Pro, 48 GB | MPS, GGUF Q4_K_M | 7 | ~550 s (≈13.5 s/step) |
+| 4 | ![RX 7900 XTX smoke](docs/images/qwen21_7900xtx_512_8steps.png) | a red apple on a wooden table, studio light | 512×512 | 8 | RX 7900 XTX, 24 GB | ROCm 7.2.1, GGUF Q4_K_M | 42 | ~18.1 s (incl. ~14 s first model load; ~0.6 s/step steady-state) |
 
 Main output, full size:
 
@@ -52,4 +84,5 @@ Qwen-Image-2.1 is released under the **Qwen Research License** — non-commercia
 ## Security notes
 
 - ComfyUI listens only on `127.0.0.1:8188`; slots are looked up via the app's `POST /prompt`/`/interrupt` rather than trusting the client UI.
+- The UI is served from a different origin, so ComfyUI must be started with `--enable-cors-header`. Keep it bound to `127.0.0.1` so the open CORS policy is never reachable from the network.
 - The web UI is fully offline: no external assets; never uses `innerHTML`/eval for server- or user-derived data; a strict CSP meta policy restricts `connect-src`/`img-src` to localhost:8188; `fetch`/`WS` requests use `AbortController` with reconnection backoff.
