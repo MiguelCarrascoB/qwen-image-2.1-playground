@@ -53,8 +53,10 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 python main.py --port 8188 --use-pytorch-cross-attention --enable-cors-header
 ```
 
-Then serve `app/` over http (`cd app && python -m http.server 8080`) and open
-`http://127.0.0.1:8080`.
+Then serve `app/` over http (`python scripts\serve_app.py`) and open
+`http://127.0.0.1:8080`. The bundled server sends `Cache-Control: no-store`, so
+CSS/ES modules are never stale. With a plain `python -m http.server`, a hard
+reload (Ctrl+Shift+R) may be needed because browsers heuristically cache assets.
 
 ## Model weights (24 GB VRAM plan)
 

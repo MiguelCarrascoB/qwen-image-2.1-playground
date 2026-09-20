@@ -6,7 +6,7 @@
  * input names or wiring without re-testing against the live server.
  * ========================================================================== */
 
-import { CONFIG } from "./config.js";
+import { CONFIG } from "./config.js?v=3";
 
 export const serverBase = CONFIG.SERVER.replace(/\/$/, "");
 

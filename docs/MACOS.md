@@ -24,10 +24,14 @@ What it does (≈11 GB downloads):
 ## Run
 
 ```bash
-./scripts/start_comfyui_mac.sh           # ComfyUI on http://127.0.0.1:8188 (CORS enabled)
-cd app && python3 -m http.server 8080    # serve the playground UI
+./scripts/start_comfyui_mac.sh   # ComfyUI on http://127.0.0.1:8188 (CORS enabled)
+python3 scripts/serve_app.py     # serve the playground UI (Cache-Control: no-store)
 # then open http://127.0.0.1:8080
 ```
+
+The bundled server sends `Cache-Control: no-store`, so CSS/ES modules are never
+stale. With a plain `python3 -m http.server`, a hard reload (Cmd+Shift+R) may be
+needed because browsers heuristically cache assets.
 
 First generation after a server start is slow (~2 min: GGUF dequant + 6 GB text
 encoder load). Subsequent generations run at roughly **13 s/step at 1024×1024** on

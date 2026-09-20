@@ -7,13 +7,13 @@
  * inserted via textContent or attribute values only.
  * ========================================================================== */
 
-import { CONFIG, STORAGE_KEY } from "./config.js";
+import { CONFIG, STORAGE_KEY } from "./config.js?v=3";
 import {
   conn, onConnectionChange, checkConnection, reconnectNow, onWsMessage,
   buildGraph, submitPrompt, interrupt, cancelQueued, fetchHistoryImages,
   fetchSystemStats, fetchQueue, viewUrl, previewUrl,
   downloadImage, serverBase,
-} from "./api.js";
+} from "./api.js?v=3";
 
 const $ = (id) => document.getElementById(id);
 
@@ -237,7 +237,7 @@ function setGenerating(on) {
   $("cancelBtn").textContent = "Cancel";
   $("progressBox").classList.toggle("active", on);
   $("progressBox").setAttribute("aria-busy", String(on));
-  $("viewerOverlay").classList.toggle("hidden", !on);
+  $("viewerOverlay").hidden = !on;
   setControlsDisabled(on);
   if (!on) {
     $("queueStatus").textContent = "";
@@ -345,11 +345,11 @@ function setServerBusy(promptId, running, pending) {
   $("busyText").textContent = "ComfyUI is working on another job" +
     (bits.length ? " (" + bits.join(", ") + ")" : "") +
     " — the GPU may be active.";
-  $("busyNotice").classList.remove("hidden");
+  $("busyNotice").hidden = false;
 }
 function clearServerBusy() {
   state.busyPromptId = null;
-  $("busyNotice").classList.add("hidden");
+  $("busyNotice").hidden = true;
 }
 
 /** Pull a foreign job's result into the gallery once it finishes. */
@@ -607,7 +607,7 @@ function addGalleryItems(images, elapsedMs) {
   for (const item of items) state.gallery.unshift(item);
   renderGallery();
   showInViewer(items[0], true);
-  $("galleryPanel").classList.remove("hidden");
+  $("galleryPanel").hidden = false;
 }
 
 function removeGalleryItem(item) {
@@ -625,7 +625,7 @@ function clearGallery() {
   state.gallery = [];
   state.selected = null;
   renderGallery();
-  $("galleryPanel").classList.add("hidden");
+  $("galleryPanel").hidden = true;
   showPlaceholder();
 }
 
@@ -672,7 +672,7 @@ function renderGallery() {
   });
   const n = state.gallery.length;
   $("galleryCount").textContent = n + (n === 1 ? " image" : " images");
-  $("galleryEmpty").classList.toggle("hidden", n > 0);
+  $("galleryEmpty").hidden = n > 0;
 }
 
 /* ============================================================================

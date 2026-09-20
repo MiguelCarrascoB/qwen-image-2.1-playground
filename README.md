@@ -24,10 +24,16 @@ Local image generation with [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Imag
    `./scripts/start_comfyui_mac.sh`; Windows:
    `python main.py --port 8188 --use-pytorch-cross-attention --enable-cors-header`).
    The UI is served from a different origin, so `--enable-cors-header` is required.
-3. Serve `app/` over http and open it, e.g. `cd app && python -m http.server 8080`,
-   then browse to `http://127.0.0.1:8080`. Generate with ⌘/Ctrl+Enter. The page
+3. Serve `app/` over http and open it, e.g. `python scripts/serve_app.py`,
+   then browse to `http://127.0.0.1:8080`. The server sends
+   `Cache-Control: no-store`, so HTML, CSS and ES modules are always fresh (no
+   new-HTML + stale-stylesheet mismatch). Generate with ⌘/Ctrl+Enter. The page
    validates node availability against the running server and shows ComfyUI
    errors verbatim.
+
+> Using a plain `python -m http.server` instead sends no cache headers, so a
+> hard reload (Ctrl/Cmd+Shift+R) may be needed — browsers heuristically cache
+> `styles.css` and ES modules.
 
 > **Verified on Windows + ROCm:** first real GPU generation on an **RX 7900 XTX
 > 24 GB** (Windows 11, torch 2.9.1+rocm7.2.1, ComfyUI 0.37.0, Python 3.12.3) —

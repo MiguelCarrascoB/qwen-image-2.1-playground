@@ -1,4 +1,4 @@
 /* main.js — entry point. Everything lives in ui.js; this file only boots it. */
-import { initUI } from "./ui.js";
+import { initUI } from "./ui.js?v=3";
 
 initUI();

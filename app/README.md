@@ -24,13 +24,17 @@ app/
 ## Running
 
 ES modules require http(s) — `file://` will not work for `js/main.js`.
-From this directory, serve statically with any server, e.g.:
+Serve statically from the repository root with the bundled no-cache server
+(Python 3.12+, stdlib only):
 
 ```sh
-cd app
-python3 -m http.server 8080
-# then open http://localhost:8080
+python scripts/serve_app.py
+# then open http://127.0.0.1:8080
 ```
+
+It sends `Cache-Control: no-store`, so `styles.css` and the ES modules are
+never stale. With a plain `python -m http.server`, a hard reload
+(Ctrl/Cmd+Shift+R) may be needed because browsers heuristically cache assets.
 
 **ComfyUI must be running** at `http://127.0.0.1:8188` with
 `--enable-cors-header` enabled (the UI is served from a different origin;
