@@ -1,9 +1,8 @@
 /* ============================================================================
  * api.js — all communication with the local ComfyUI server.
  *
- * The workflow-graph construction below is copied VERBATIM from the verified
- * single-file version (pruebaImage/index.html) — do not change node types,
- * input names or wiring without re-testing against the live server.
+ * The workflow graphs below were verified against a live ComfyUI server;
+ * do not change node types, input names or wiring without re-testing.
  * ========================================================================== */
 
 import { CONFIG } from "./config.js?v=4";
