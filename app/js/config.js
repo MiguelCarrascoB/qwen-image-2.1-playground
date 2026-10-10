@@ -1,8 +1,7 @@
 /* ============================================================================
  * config.js — every model / node-type / file name lives here so it's trivial
- * to tweak. Values are copied verbatim from the verified single-file version
- * (../pruebaImage/index.html); do not "improve" them without re-testing
- * against the live ComfyUI server.
+ * to tweak. Values were verified against a live ComfyUI server (2026-09-20);
+ * re-test with the server before changing them.
  *
  * Validation: on connect the app GETs /object_info and checks that these node
  * classes exist on the server, warning in the UI if any are missing.

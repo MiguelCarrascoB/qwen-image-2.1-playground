@@ -65,12 +65,14 @@ Download into the ComfyUI directory root's `models/` subfolders:
 
 | File | Repo | Size | Folder |
 |---|---|---|---|
-| `qwen_image_2.1_Q6_K.gguf` | `Abiray/Qwen-Image-2.1-GGUF` | 5.9 GB | `models/unet/` |
+| `qwen_image_2.1_Q4_K_M.gguf` | `Abiray/Qwen-Image-2.1-GGUF` | 4.2 GB | `models/unet/` |
 | `qwen3vl_8b_w4a8.safetensors` | `Comfy-Org/Qwen-Image-2.1` | 6.3 GB | `models/text_encoders/` |
 | `qwen_image_2.1_vae_bf16.safetensors` | `Comfy-Org/Qwen-Image-2.1` | 0.7 GB | `models/vae/` |
 
 Peak VRAM ≈ **12–14 GB** (encoder loads, encodes, then offloads before the DiT
-loads). Fits in 24 GB with room for 1536–2048 px renders; `Q8_0` DiT also fits.
+loads). Fits in 24 GB with room for 1536–2048 px renders. `Q6_K` and `Q8_0` also
+fit and render text a bit better; if you use one, change `UNET_GGUF` in
+`app/js/config.js` to match the filename, or ComfyUI will reject the job.
 No `--lowvram` flags should be needed. If you prefer to skip GGUF entirely, the
 Comfy-native quant pair (`qwen_image_2.1_int8_convrot.safetensors` + `qwen3vl_8b_int8_convrot.safetensors`)
 goes into `models/diffusion_models/` and `models/text_encoders/`.
