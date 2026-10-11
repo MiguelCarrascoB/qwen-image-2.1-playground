@@ -13,13 +13,16 @@ GGUF weights** (quantization is llama.cpp-style, the runtime is ComfyUI on PyTor
 ./scripts/setup_mac.sh
 ```
 
-What it does (≈11 GB downloads):
-1. Clones ComfyUI and `city96/ComfyUI-GGUF` into `ComfyUI/custom_nodes/`
+What it does (≈17 GB downloads; re-running updates and resumes):
+1. Clones (or `git pull`s) ComfyUI and `city96/ComfyUI-GGUF` into `ComfyUI/custom_nodes/`
 2. Creates a Python **3.13** venv (pip torch has no 3.14 wheels yet)
 3. Downloads:
    - `Abiray/Qwen-Image-2.1-GGUF` → `qwen_image_2.1_Q4_K_M.gguf` (4.0 GB) → `models/unet/`
    - `Comfy-Org/Qwen-Image-2.1` → `qwen3vl_8b_w4a8.safetensors` (6.0 GB) → `models/text_encoders/`
    - `Comfy-Org/Qwen-Image-2.1` → `qwen_image_2.1_vae_bf16.safetensors` (644 MB) → `models/vae/`
+
+The script also downloads **Qwen-Image-2.1 Turbo** (`Q6_K`, 5.9 GB). Add
+`--uncensored` for the abliterated text encoder, and see [TURBO.md](TURBO.md).
 
 ## Run
 

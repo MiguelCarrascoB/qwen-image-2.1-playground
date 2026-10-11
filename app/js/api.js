@@ -1,11 +1,11 @@
 /* ============================================================================
  * api.js — all communication with the local ComfyUI server.
  *
- * The workflow graphs below were verified against a live ComfyUI server;
- * do not change node types, input names or wiring without re-testing.
+ * The base preset's workflow graphs were verified against a live ComfyUI
+ * server; do not change node types, input names or wiring without re-testing.
  * ========================================================================== */
 
-import { CONFIG } from "./config.js?v=4";
+import { CONFIG } from "./config.js?v=5";
 
 export const serverBase = CONFIG.SERVER.replace(/\/$/, "");
 
@@ -164,7 +164,9 @@ export async function checkConnection() {
   return inFlightCheck;
 }
 
-/** Returns a human-readable list of missing node classes (empty if all good). */
+/** Returns a human-readable list of missing node classes (empty if all good).
+ * Covers the nodes every preset needs; per-preset extras (Turbo sampler nodes,
+ * the GGUF text-encoder loader) are reported by resolveModel(). */
 export function validateNodeTypes() {
   const info = conn.objectInfo;
   if (!info) return [];
@@ -184,19 +186,98 @@ export function validateNodeTypes() {
   return required.filter((t) => !(t in info));
 }
 
+/** Enum list of a loader input from /object_info (empty if unknown). */
+function enumOf(nodeType, input) {
+  const node = conn.objectInfo && conn.objectInfo[nodeType];
+  const spec = node && node.input && node.input.required && node.input.required[input];
+  return (spec && Array.isArray(spec[0])) ? spec[0] : [];
+}
+
+/** Resolve a preset to concrete files: the first candidate the server lists
+ * wins. Returns { key, preset, unet, clip, missingFiles[], missingNodes[] }.
+ * With no /object_info yet, falls back to the first candidate. */
+export function resolveModel(key) {
+  const k = CONFIG.MODELS[key] ? key : CONFIG.DEFAULT_MODEL;
+  const preset = CONFIG.MODELS[k];
+  const info = conn.objectInfo || {};
+  const pick = (candidates, nodeType, input) => {
+    const list = enumOf(nodeType, input);
+    return { file: candidates.find((f) => list.includes(f)) || candidates[0], known: list.length > 0, list };
+  };
+  const unet = pick(preset.unet, CONFIG.UNET_LOADER_TYPE, "unet_name");
+  const clip = pick(preset.clip, preset.clipLoader, "clip_name");
+  const vae  = pick([CONFIG.VAE_NAME], CONFIG.VAE_LOADER_TYPE, "vae_name");
+
+  const missingFiles = [];
+  for (const [r, candidates] of [[unet, preset.unet], [clip, preset.clip], [vae, [CONFIG.VAE_NAME]]]) {
+    if (r.known && !r.list.includes(r.file)) missingFiles.push(candidates.join(" | "));
+  }
+  const nodes = [preset.clipLoader];
+  if (preset.sigmas) nodes.push(CONFIG.MANUAL_SIGMAS_TYPE, CONFIG.SAMPLER_SELECT_TYPE, CONFIG.SAMPLER_CUSTOM_TYPE);
+  const missingNodes = conn.objectInfo ? nodes.filter((t) => !(t in info)) : [];
+  return { key: k, preset, unet: unet.file, clip: clip.file, missingFiles, missingNodes };
+}
+
 /* ============================================================================
- * Graph construction — ComfyUI API-format graph (flat node map). VERBATIM
- * from the verified single-file version.
+ * Graph construction — ComfyUI API-format graph (flat node map). The base
+ * preset's wiring is VERBATIM from the verified single-file version; Turbo
+ * presets only swap the loaders and replace KSampler with
+ * ManualSigmas -> SamplerCustom (fixed 8-step schedule).
  * ========================================================================== */
+
+/** Loader nodes ("unet", "clip", "vae") for the resolved preset. */
+function addLoaders(add, m) {
+  add("unet", CONFIG.UNET_LOADER_TYPE, { unet_name: m.unet });
+  add("clip", m.preset.clipLoader, { clip_name: m.clip, type: CONFIG.CLIP_TYPE });
+  add("vae",  CONFIG.VAE_LOADER_TYPE,  { vae_name: CONFIG.VAE_NAME });
+}
+
+/** Sampler node "ksampler" (output 0 = latent) for the resolved preset. */
+function addSampler(add, m, p, latentRef, defaultDenoise) {
+  let modelRef = ["unet", 0];
+  if (CONFIG.CFG_NORM_TYPE) {
+    add("cfgnorm", CONFIG.CFG_NORM_TYPE, { model: ["unet", 0] });
+    modelRef = ["cfgnorm", 0];
+  }
+
+  if (m.preset.sigmas) {
+    // Turbo: the distilled schedule replaces steps/scheduler/denoise.
+    add("sigmas", CONFIG.MANUAL_SIGMAS_TYPE, { sigmas: m.preset.sigmas });
+    add("samplerSelect", CONFIG.SAMPLER_SELECT_TYPE, { sampler_name: p.sampler || CONFIG.SAMPLER_NAME });
+    add("ksampler", CONFIG.SAMPLER_CUSTOM_TYPE, {
+      model: modelRef,
+      add_noise: true,
+      noise_seed: p.seed,
+      cfg: p.cfg,
+      positive: ["enc", 0],
+      negative: ["enc", 1],
+      sampler: ["samplerSelect", 0],
+      sigmas: ["sigmas", 0],
+      latent_image: latentRef,
+    });
+    return;
+  }
+
+  add("ksampler", CONFIG.KSAMPLER_TYPE, {
+    seed: p.seed,
+    steps: p.steps,
+    cfg: p.cfg,
+    sampler_name: p.sampler || CONFIG.SAMPLER_NAME,
+    scheduler: p.scheduler || CONFIG.SCHEDULER,
+    denoise: (p.denoise === undefined ? defaultDenoise : p.denoise),
+    model: modelRef,
+    positive: ["enc", 0],
+    negative: ["enc", 1],
+    latent_image: latentRef,
+  });
+}
 
 export function buildGraph(p) {
   const g = {};
   const add = (id, classType, inputs) => { g[id] = { class_type: classType, inputs }; };
+  const m = resolveModel(p.model);
 
-  // Loaders
-  add("unet",  CONFIG.UNET_LOADER_TYPE, { unet_name: CONFIG.UNET_GGUF });
-  add("clip",  CONFIG.CLIP_LOADER_TYPE, { clip_name: CONFIG.CLIP_NAME, type: CONFIG.CLIP_TYPE });
-  add("vae",   CONFIG.VAE_LOADER_TYPE,  { vae_name: CONFIG.VAE_NAME });
+  addLoaders(add, m);
 
   // Text encoding — single node, outputs [0]=positive, [1]=negative
   add("enc", CONFIG.TEXT_ENCODE_TYPE, {
@@ -209,26 +290,7 @@ export function buildGraph(p) {
   // Latent — see CONFIG.EMPTY_LATENT_TYPE note re: 16ch vs 64ch variants.
   add("latent", CONFIG.EMPTY_LATENT_TYPE, { width: p.width, height: p.height, batch_size: p.batch || 1 });
 
-  // Optional CFGNorm between model and sampler
-  let modelRef = ["unet", 0];
-  if (CONFIG.CFG_NORM_TYPE) {
-    add("cfgnorm", CONFIG.CFG_NORM_TYPE, { model: ["unet", 0] });
-    modelRef = ["cfgnorm", 0];
-  }
-
-  // Sampler
-  add("ksampler", CONFIG.KSAMPLER_TYPE, {
-    seed: p.seed,
-    steps: p.steps,
-    cfg: p.cfg,
-    sampler_name: p.sampler || CONFIG.SAMPLER_NAME,
-    scheduler: p.scheduler || CONFIG.SCHEDULER,
-    denoise: (p.denoise === undefined ? CONFIG.DENOISE : p.denoise),
-    model: modelRef,
-    positive: ["enc", 0],
-    negative: ["enc", 1],
-    latent_image: ["latent", 0],
-  });
+  addSampler(add, m, p, ["latent", 0], CONFIG.DENOISE);
 
   add("decode", CONFIG.VAE_DECODE_TYPE, { samples: ["ksampler", 0], vae: ["vae", 0] });
   add("save", CONFIG.SAVE_IMAGE_TYPE, { images: ["decode", 0], filename_prefix: CONFIG.FILENAME_PREFIX });
@@ -239,16 +301,15 @@ export function buildGraph(p) {
 /** Image-edit graph. Reference images are uploaded first (see uploadImage);
  * each becomes a LoadImage feeding the encoder's autogrow `images.image_N`
  * inputs. The encoder's third output (`latent`, sized to the first reference)
- * seeds KSampler, so no EmptyLatentImage / VAEEncode is involved. Verified
+ * seeds the sampler, so no EmptyLatentImage / VAEEncode is involved. Verified
  * end-to-end against the live server on 2026-09-20. */
 export function buildEditGraph(p) {
   const g = {};
   const add = (id, classType, inputs) => { g[id] = { class_type: classType, inputs }; };
+  const m = resolveModel(p.model);
 
   // Same loaders as the T2I path.
-  add("unet", CONFIG.UNET_LOADER_TYPE, { unet_name: CONFIG.UNET_GGUF });
-  add("clip", CONFIG.CLIP_LOADER_TYPE, { clip_name: CONFIG.CLIP_NAME, type: CONFIG.CLIP_TYPE });
-  add("vae",  CONFIG.VAE_LOADER_TYPE,  { vae_name: CONFIG.VAE_NAME });
+  addLoaders(add, m);
 
   // One LoadImage per reference + its `images.image_N` encoder input.
   const enc = {
@@ -265,24 +326,7 @@ export function buildEditGraph(p) {
   });
   add("enc", CONFIG.TEXT_ENCODE_TYPE, enc);
 
-  let modelRef = ["unet", 0];
-  if (CONFIG.CFG_NORM_TYPE) {
-    add("cfgnorm", CONFIG.CFG_NORM_TYPE, { model: ["unet", 0] });
-    modelRef = ["cfgnorm", 0];
-  }
-
-  add("ksampler", CONFIG.KSAMPLER_TYPE, {
-    seed: p.seed,
-    steps: p.steps,
-    cfg: p.cfg,
-    sampler_name: p.sampler || CONFIG.SAMPLER_NAME,
-    scheduler: p.scheduler || CONFIG.SCHEDULER,
-    denoise: (p.denoise === undefined ? CONFIG.EDIT_DENOISE : p.denoise),
-    model: modelRef,
-    positive: ["enc", 0],
-    negative: ["enc", 1],
-    latent_image: ["enc", 2],
-  });
+  addSampler(add, m, p, ["enc", 2], CONFIG.EDIT_DENOISE);
 
   add("decode", CONFIG.VAE_DECODE_TYPE, { samples: ["ksampler", 0], vae: ["vae", 0] });
   add("save", CONFIG.SAVE_IMAGE_TYPE, { images: ["decode", 0], filename_prefix: CONFIG.EDIT_FILENAME_PREFIX });

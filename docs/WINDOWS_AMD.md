@@ -59,6 +59,14 @@ Then serve `app/` over http (`python scripts\serve_app.py`) and open
 CSS/ES modules are never stale. With a plain `python -m http.server`, a hard
 reload (Ctrl+Shift+R) may be needed because browsers heuristically cache assets.
 
+## Qwen-Image-2.1 Turbo / uncensored encoder
+
+After the base install works, run
+`powershell -ExecutionPolicy Bypass -File scripts\setup_windows.ps1` (add
+`-Uncensored` for the abliterated text encoder, `-Mirror` if the HF CDN
+stalls). It updates ComfyUI + ComfyUI-GGUF and downloads the Turbo DiT. See
+[TURBO.md](TURBO.md).
+
 ## Model weights (24 GB VRAM plan)
 
 Download into the ComfyUI directory root's `models/` subfolders:
@@ -71,8 +79,8 @@ Download into the ComfyUI directory root's `models/` subfolders:
 
 Peak VRAM ≈ **12–14 GB** (encoder loads, encodes, then offloads before the DiT
 loads). Fits in 24 GB with room for 1536–2048 px renders. `Q6_K` and `Q8_0` also
-fit and render text a bit better; if you use one, change `UNET_GGUF` in
-`app/js/config.js` to match the filename, or ComfyUI will reject the job.
+fit and render text a bit better. The app uses whichever of these is installed
+(the candidate list is in `app/js/config.js`).
 No `--lowvram` flags should be needed. If you prefer to skip GGUF entirely, the
 Comfy-native quant pair (`qwen_image_2.1_int8_convrot.safetensors` + `qwen3vl_8b_int8_convrot.safetensors`)
 goes into `models/diffusion_models/` and `models/text_encoders/`.

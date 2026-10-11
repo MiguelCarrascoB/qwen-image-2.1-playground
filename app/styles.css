@@ -344,6 +344,8 @@ input[type="range"]::-moz-range-thumb {
 .custom-size-row.visible { display: flex; }
 
 .hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.hint.warn { color: var(--warn); }
+.hint:empty { display: none; }
 
 /* ----------------------------------------------------------- server card */
 .server-card {

@@ -10,13 +10,13 @@
 export const CONFIG = {
   SERVER: "http://127.0.0.1:8188",
 
-  // --- Model files (edit if the installed filenames differ) -----------------
-  UNET_GGUF: "qwen_image_2.1_Q4_K_M.gguf",          // ComfyUI-GGUF UnetLoaderGGUF
-  // NOTE: verified against live /object_info on 2026-09-20 — the file on disk
-  // uses underscores: qwen_image_2.1_Q4_K_M.gguf (the hyphenated
-  // "qwen_image_2.1-Q4_K_M.gguf" from the prototype was rejected by the server).
-  CLIP_NAME: "qwen3vl_8b_w4a8.safetensors",          // CLIPLoader, type "qwen_image"
-  VAE_NAME:  "qwen_image_2.1_vae_bf16.safetensors",  // VAELoader
+  // --- Model files ----------------------------------------------------------
+  // DiT + text-encoder filenames live in MODELS below (edit there if the
+  // installed filenames differ). NOTE: verified against live /object_info on
+  // 2026-09-20 — the base file on disk uses underscores:
+  // qwen_image_2.1_Q4_K_M.gguf (the hyphenated "qwen_image_2.1-Q4_K_M.gguf"
+  // from the prototype was rejected by the server).
+  VAE_NAME:  "qwen_image_2.1_vae_bf16.safetensors",  // VAELoader, shared by all presets
 
   // --- Loader node types ----------------------------------------------------
   UNET_LOADER_TYPE: "UnetLoaderGGUF",   // from ComfyUI-GGUF
@@ -64,6 +64,58 @@ export const CONFIG = {
     accept: ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"],
   },
 
+  // --- Model presets --------------------------------------------------------
+  // Each preset names candidate files in preference order; the first one the
+  // server lists in the loader's /object_info enum is used, so a Mac with Q4
+  // and a 7900 XTX with Q8 run the same UI unchanged. VAE is shared.
+  //
+  // Turbo is the 8-step distilled checkpoint (Qwen/Qwen-Image-2.1-Turbo). It
+  // must run its own sigma schedule at CFG 1 — `sample_sigmas` from the
+  // checkpoint's model_index.json plus a final 0 (scheduler shift is 1.0, so
+  // the values are used as-is). KSampler can't take explicit sigmas, so Turbo
+  // graphs use ManualSigmas -> SamplerCustom instead.
+  //
+  // "turbo-uncensored" swaps only the text encoder for AtomicChat's abliterated
+  // Qwen3-VL-8B (refusal direction projected out). The denoiser is the same
+  // Turbo DiT. AtomicChat ships it as a text-only GGUF for stable-diffusion.cpp,
+  // which ComfyUI can't use as a Qwen-Image-2.1 encoder (no vision tower), so
+  // scripts/build_uncensored_encoder.py converts it into this BF16 file, loaded
+  // by the core CLIPLoader like the stock encoder.
+  DEFAULT_MODEL: "base",
+  MODELS: {
+    base: {
+      label: "Qwen-Image-2.1",
+      unet: ["qwen_image_2.1_Q4_K_M.gguf", "qwen_image_2.1_Q6_K.gguf", "qwen_image_2.1_Q8_0.gguf"],
+      clipLoader: "CLIPLoader",
+      clip: ["qwen3vl_8b_w4a8.safetensors"],
+      sigmas: null,                  // KSampler with the user's steps/scheduler
+    },
+    turbo: {
+      label: "Qwen-Image-2.1 Turbo (8 steps)",
+      unet: [
+        "qwen_image_2.1_turbo_Q8_0.gguf", "qwen_image_2.1_turbo_Q6_K.gguf",
+        "qwen_image_2.1_turbo_Q5_K_M.gguf", "qwen_image_2.1_turbo_Q4_K_M.gguf",
+      ],
+      clipLoader: "CLIPLoader",
+      clip: ["qwen3vl_8b_w4a8.safetensors"],
+      sigmas: "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0",
+    },
+    "turbo-uncensored": {
+      label: "Turbo + uncensored encoder",
+      unet: [
+        "qwen_image_2.1_turbo_Q8_0.gguf", "qwen_image_2.1_turbo_Q6_K.gguf",
+        "qwen_image_2.1_turbo_Q5_K_M.gguf", "qwen_image_2.1_turbo_Q4_K_M.gguf",
+      ],
+      clipLoader: "CLIPLoader",
+      clip: ["qwen3vl_8b_abliterated_bf16.safetensors"],
+      sigmas: "1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568, 0.0",
+    },
+  },
+  // Turbo graph nodes (ComfyUI core).
+  MANUAL_SIGMAS_TYPE:  "ManualSigmas",
+  SAMPLER_SELECT_TYPE: "KSamplerSelect",
+  SAMPLER_CUSTOM_TYPE: "SamplerCustom",
+
   // --- Sampler defaults (UI can override) ----------------------------------
   SAMPLER_NAME: "euler",
   SCHEDULER:    "simple",
@@ -72,6 +124,7 @@ export const CONFIG = {
   // --- UI defaults ----------------------------------------------------------
   DEFAULTS: {
     mode: "t2i",                     // "t2i" | "edit"
+    model: "base",                   // key of CONFIG.MODELS
     prompt: "A cozy cabin in a snowy forest at dusk, warm light in the windows, cinematic lighting",
     editInstruction: "Describe the change here, e.g. \u201cmake the jacket bright red, keep the pose and background\u201d",
     negPrompt: "blurry, low quality, watermark, text",

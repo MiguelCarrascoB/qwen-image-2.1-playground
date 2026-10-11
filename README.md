@@ -49,6 +49,7 @@ flowchart LR
 - **Two modes:**
   - **Text → Image.**
   - **Edit image:** drag and drop, browse or paste up to 16 reference images, then write an instruction. References go into `TextEncodeQwenImage21`'s `images` inputs, and that node's latent output seeds the sampler.
+- **Model selector:** Qwen-Image-2.1, **Turbo** (8-step distilled, fixed sigma schedule via `ManualSigmas` → `SamplerCustom`) and **Turbo + uncensored encoder**. Each preset uses the best quant installed on the server and flags missing files. See [docs/TURBO.md](docs/TURBO.md).
 - **Validated against the live server:** on connect, the app checks `/object_info` for the required node types and fills the sampler and scheduler menus from the server's own lists. ComfyUI errors are shown verbatim.
 - **Job tracking that survives reloads:**
   - WebSocket progress with step count, ETA and queue position.
@@ -68,6 +69,7 @@ flowchart LR
 1. **Install ComfyUI and the weights** (about 11 GB):
    - **macOS:** `./scripts/setup_mac.sh`. See [docs/MACOS.md](docs/MACOS.md).
    - **Windows 11 + RX 7900 XTX:** ComfyUI Desktop or portable, which selects ROCm automatically. See [docs/WINDOWS_AMD.md](docs/WINDOWS_AMD.md).
+   - **Turbo / uncensored encoder:** `scripts/setup_windows.ps1 [-Uncensored]` or `./scripts/setup_mac.sh [--uncensored]`. See [docs/TURBO.md](docs/TURBO.md).
 2. **Start ComfyUI** with CORS scoped to the UI origin:
    ```bash
    ./scripts/start_comfyui_mac.sh
@@ -79,7 +81,7 @@ flowchart LR
 > [!WARNING]
 > Never start ComfyUI with a bare `--enable-cors-header`. It answers `Access-Control-Allow-Origin: *`, which lets any website you visit read your ComfyUI files and queue jobs.
 
-Model filenames and node types are all in [`app/js/config.js`](app/js/config.js). Edit that file if your files are named differently or you use another quant.
+Model filenames and node types are all in [`app/js/config.js`](app/js/config.js). Each preset lists candidate quants and the app uses the first one installed. Edit that file if your files are named differently.
 
 ## Results
 
@@ -98,13 +100,16 @@ All runs use euler / simple / CFG 1.0 with an empty negative prompt and the GGUF
 | --- | --- | --- | --- |
 | Mac 24-48 GB unified | GGUF `Q4_K_M` (4.2 GB) | `qwen3vl_8b_w4a8` (6.3 GB) | used for the M4 Pro runs above; ~14 GB peak |
 | Mac 64 GB+ unified | GGUF `Q8_0` (7.6 GB) | `w4a8` / `int8_convrot` | suggested, not measured |
-| RX 7900 XTX 24 GB | GGUF `Q4_K_M` (measured); `Q6_K` (5.9 GB) / `Q8_0` also fit (set `UNET_GGUF` to match) | `qwen3vl_8b_w4a8` | ~12-14 GB peak |
+| RX 7900 XTX 24 GB | GGUF `Q4_K_M` (measured); `Q6_K` (5.9 GB) / `Q8_0` also fit (the app picks whichever is installed) | `qwen3vl_8b_w4a8` | ~12-14 GB peak |
+| **Turbo**, RX 7900 XTX | Turbo GGUF `Q8_0` (7.6 GB) | `qwen3vl_8b_w4a8` | ~14 GB peak, not measured |
+| **Turbo**, Mac 48 GB | Turbo GGUF `Q6_K` (5.9 GB) | `qwen3vl_8b_w4a8` | ~15 GB, not measured |
+| **Turbo + uncensored** | Turbo GGUF | `qwen3vl_8b_abliterated_bf16` (17.5 GB, built locally) | encoder offloads to RAM on 24 GB cards, see [details](docs/TURBO.md#memory) |
 
 <!-- TODO: add a short GIF of a generation and an edit run -->
 
 ## Roadmap
 
-- [ ] Add [Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo) as a second model
+- [x] Add [Qwen-Image-2.1-Turbo](https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo) as a second model
 - [ ] Benchmark `Q6_K` / `Q8_0` vs `Q4_K_M` (speed and visual quality) on the same seeds
 - [ ] NVIDIA / CUDA setup guide and timings
 - [ ] Persist the gallery across sessions (IndexedDB)

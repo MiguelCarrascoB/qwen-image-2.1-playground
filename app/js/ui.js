@@ -7,14 +7,14 @@
  * inserted via textContent or attribute values only.
  * ========================================================================== */
 
-import { CONFIG, STORAGE_KEY } from "./config.js?v=4";
+import { CONFIG, STORAGE_KEY } from "./config.js?v=5";
 import {
   conn, onConnectionChange, checkConnection, reconnectNow, onWsMessage,
   buildGraph, buildEditGraph, submitPrompt, uploadImage, imageRef,
   interrupt, cancelQueued, fetchHistoryImages,
   fetchSystemStats, fetchQueue, viewUrl, previewUrl,
-  downloadImage, serverBase,
-} from "./api.js?v=4";
+  downloadImage, serverBase, resolveModel,
+} from "./api.js?v=5";
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,13 +36,15 @@ function saveSettings() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       mode:            state.mode,
+      model:           state.model,
       prompt:          $("prompt").value,
       editInstruction: $("editInstruction").value,
       negPrompt:       $("negPrompt").value,
       width:           $("width").value,
       height:          $("height").value,
-      steps:           $("steps").value,
-      cfg:             $("cfg").value,
+      // Turbo pins the slider to its fixed schedule; persist the user's own value.
+      steps:           isFixedSchedule() ? state.baseSteps : $("steps").value,
+      cfg:             isFixedSchedule() ? state.baseCfg : $("cfg").value,
       seed:            $("seed").value,
       seedLocked:      $("lockSeed").classList.contains("active"),
       sampler:         $("sampler").value,
@@ -59,6 +61,9 @@ function saveSettings() {
 
 const state = {
   mode: "t2i", // "t2i" | "edit"
+  model: CONFIG.DEFAULT_MODEL, // key of CONFIG.MODELS
+  baseSteps: CONFIG.DEFAULTS.steps, // user's steps while a fixed-schedule preset pins the slider
+  baseCfg: CONFIG.DEFAULTS.cfg, // user's CFG while a fixed-schedule preset pins it to 1
   generating: false,
   currentPromptId: null,
   startTime: 0,
@@ -78,7 +83,7 @@ const state = {
   ownPromptIds: new Set(), // jobs this page submitted (never treated as foreign)
   recoveredIds: new Set(), // foreign jobs already pulled into the gallery
   busyPromptId: null, // foreign job currently running on the server
-  gallery: [], // { filename, subfolder, type, mode, prompt, instruction, seed, steps, width, height, elapsed, ts }
+  gallery: [], // { filename, subfolder, type, mode, model, prompt, instruction, seed, steps, width, height, elapsed, ts }
   selected: null,
   editImages: [], // { id, name, previewUrl, status, server, image, progress }
   editSeq: 0,
@@ -203,20 +208,59 @@ function startStatsPolling() {
 }
 
 function renderModelInfo() {
-  const info = conn.objectInfo || {};
-  const reqOf = (node) => (info[node] && info[node].input && info[node].input.required) || {};
-  const unetList = reqOf(CONFIG.UNET_LOADER_TYPE).unet_name ? reqOf(CONFIG.UNET_LOADER_TYPE).unet_name[0] : [];
-  const clipList = reqOf(CONFIG.CLIP_LOADER_TYPE).clip_name ? reqOf(CONFIG.CLIP_LOADER_TYPE).clip_name[0] : [];
-  const vaeList = reqOf(CONFIG.VAE_LOADER_TYPE).vae_name ? reqOf(CONFIG.VAE_LOADER_TYPE).vae_name[0] : [];
-  const quant = (CONFIG.UNET_GGUF.match(/(Q\d[_A-Z0-9]*)/i) || [])[1] || "GGUF";
-  $("modelName").textContent = "Qwen-Image-2.1 · " + quant;
-  $("modelName").title = CONFIG.UNET_GGUF;
+  const m = resolveModel(state.model);
+  const quant = (m.unet.match(/(Q\d[_A-Z0-9]*)/i) || [])[1] || "GGUF";
+  $("modelName").textContent = m.preset.label + " · " + quant;
+  $("modelName").title = m.unet + "\n" + m.clip;
 
-  const missing = [];
-  if (unetList.length && !unetList.includes(CONFIG.UNET_GGUF)) missing.push(CONFIG.UNET_GGUF);
-  if (clipList.length && !clipList.includes(CONFIG.CLIP_NAME)) missing.push(CONFIG.CLIP_NAME);
-  if (vaeList.length && !vaeList.includes(CONFIG.VAE_NAME)) missing.push(CONFIG.VAE_NAME);
-  return missing;
+  const problems = [...m.missingFiles];
+  if (m.missingNodes.length) problems.push("node types: " + m.missingNodes.join(", "));
+  $("modelHint").textContent = problems.length
+    ? "Not installed on this server — " + problems.join("; ") + ". See the setup guide for this preset."
+    : (m.preset.sigmas ? "Fixed 8-step distilled schedule at CFG 1 — steps, CFG, scheduler and denoise are locked." : "");
+  $("modelHint").classList.toggle("warn", problems.length > 0);
+  return problems;
+}
+
+/** Presets with their own sigma schedule ignore steps/scheduler/denoise. */
+function isFixedSchedule() {
+  return !!CONFIG.MODELS[state.model].sigmas;
+}
+
+/** Number of sampling steps a fixed schedule implies (sigmas minus the final 0). */
+function fixedSteps() {
+  return CONFIG.MODELS[state.model].sigmas.split(",").length - 1;
+}
+
+/** Lock or unlock the controls a fixed-schedule preset overrides. */
+function applyModelLocks() {
+  const fixed = isFixedSchedule();
+  const locked = fixed || state.generating;
+  for (const id of ["steps", "scheduler", "denoise", "cfg"]) $(id).disabled = locked;
+  if (fixed) {
+    $("steps").value = fixedSteps();
+    $("stepsVal").textContent = $("steps").value;
+    $("cfg").value = 1; // distilled for CFG 1; higher doubles the cost per step
+  }
+}
+
+function setModel(key, persist = true) {
+  const next = CONFIG.MODELS[key] ? key : CONFIG.DEFAULT_MODEL;
+  // Keep the user's own step count when entering/leaving a fixed schedule.
+  if (!isFixedSchedule()) {
+    state.baseSteps = $("steps").value;
+    state.baseCfg = $("cfg").value;
+  }
+  state.model = next;
+  $("model").value = next;
+  if (!isFixedSchedule()) {
+    $("steps").value = state.baseSteps;
+    $("stepsVal").textContent = $("steps").value;
+    $("cfg").value = state.baseCfg;
+  }
+  applyModelLocks();
+  renderModelInfo();
+  if (persist) saveSettings();
 }
 
 /* ============================================================================
@@ -248,7 +292,7 @@ function hideError() {
  * ========================================================================== */
 
 const CONTROL_IDS = [
-  "prompt", "editInstruction", "negPrompt", "width", "height", "steps", "cfg", "seed",
+  "model", "prompt", "editInstruction", "negPrompt", "width", "height", "steps", "cfg", "seed",
   "randomizeBtn", "lockSeed", "sampler", "scheduler", "denoise", "batch",
   "dropZone", "modeT2i", "modeEdit",
 ];
@@ -262,6 +306,7 @@ function setControlsDisabled(disabled) {
   // reference image, so keep the control disabled in that mode.
   $("batch").disabled = disabled || state.mode === "edit";
   for (const chip of $("sizePresets").children) chip.disabled = disabled;
+  if (!disabled) applyModelLocks();
 }
 
 function setGenerating(on) {
@@ -574,6 +619,8 @@ async function checkHistoryFallback() {
 
 function applyItemParams(item) {
   const edit = item.mode === "edit";
+  // Items from before model presets existed were rendered with the base model.
+  setModel(item.model || "base");
   setMode(edit ? "edit" : "t2i");
   if (edit) {
     $("editInstruction").value = item.instruction || "";
@@ -588,8 +635,8 @@ function applyItemParams(item) {
     $("height").value = item.height;
     syncPresetFromInputs();
   }
-  if (item.steps !== undefined) { $("steps").value = item.steps; $("stepsVal").textContent = item.steps; }
-  if (item.cfg !== undefined) $("cfg").value = item.cfg;
+  if (item.steps !== undefined && !isFixedSchedule()) { $("steps").value = item.steps; $("stepsVal").textContent = item.steps; }
+  if (item.cfg !== undefined && !isFixedSchedule()) $("cfg").value = item.cfg;
   if (item.seed !== undefined) $("seed").value = item.seed;
   $("lockSeed").classList.add("active");
   syncLockButton();
@@ -621,6 +668,7 @@ function showInViewer(item, focusViewer = false) {
   const facts = el("div", { class: "meta-facts" });
   const grid = el("div", { class: "meta-grid" },
     el("span", { class: "meta-k", text: "Mode" }),  el("span", { text: isEdit ? "Edit" : "Text → Image" }),
+    el("span", { class: "meta-k", text: "Model" }), el("span", { text: item.model ? CONFIG.MODELS[item.model]?.label || item.model : "—" }),
     el("span", { class: "meta-k", text: "Seed" }),  el("span", { text: String(item.seed) }),
     el("span", { class: "meta-k", text: "Steps" }), el("span", { text: String(item.steps) }),
     el("span", { class: "meta-k", text: "CFG" }),   el("span", { text: String(item.cfg) }),
@@ -679,6 +727,7 @@ function addGalleryItems(images, elapsedMs, params, focusViewer = true) {
     type: img.type || "output",
     url: viewUrl(img),
     mode: p.mode || "t2i",
+    model: p.model,
     instruction: p.instruction,
     references: p.images
       ? p.images.map((r) => ({ name: r.name, subfolder: r.subfolder, type: r.type }))
@@ -832,11 +881,12 @@ async function generate() {
   saveSettings();
 
   const common = {
+    model:     state.model,
     negPrompt: $("negPrompt").value.trim(),
     width:     clampInt($("width").value, CONFIG.MIN_SIZE, CONFIG.MAX_SIZE, 1024),
     height:    clampInt($("height").value, CONFIG.MIN_SIZE, CONFIG.MAX_SIZE, 1024),
-    steps:     clampInt($("steps").value, CONFIG.MIN_STEPS, CONFIG.MAX_STEPS, 40),
-    cfg:       clampNum($("cfg").value, 1, 20, 1),
+    steps:     isFixedSchedule() ? fixedSteps() : clampInt($("steps").value, CONFIG.MIN_STEPS, CONFIG.MAX_STEPS, 40),
+    cfg:       isFixedSchedule() ? 1 : clampNum($("cfg").value, 1, 20, 1),
     // ComfyUI expects a JSON number for `seed`. BigInt cannot be passed
     // through JSON.stringify (throws "Do not know how to serialize a BigInt"),
     // and JSON numbers are exact only up to 2^53-1, so clamp to that range.
@@ -1311,6 +1361,9 @@ function wireEvents() {
     updateQueue();
   });
 
+  // Model preset
+  $("model").addEventListener("change", () => setModel($("model").value));
+
   // Size inputs
   $("width").addEventListener("input", syncPresetFromInputs);
   $("height").addEventListener("input", syncPresetFromInputs);
@@ -1364,6 +1417,13 @@ function initInputs() {
   $("denoise").value = s.denoise !== undefined ? s.denoise : CONFIG.DEFAULTS.denoise;
   $("batch").value = s.batch !== undefined ? s.batch : CONFIG.DEFAULTS.batch;
   $("stepsVal").textContent = $("steps").value;
+  state.baseSteps = $("steps").value;
+  state.baseCfg = $("cfg").value;
+
+  for (const [key, preset] of Object.entries(CONFIG.MODELS)) {
+    $("model").append(el("option", { value: key, text: preset.label }));
+  }
+  setModel(s.model !== undefined ? s.model : CONFIG.DEFAULTS.model, false);
 
   if (s.seedLocked) $("lockSeed").classList.add("active");
   syncLockButton();
@@ -1424,7 +1484,7 @@ export function initUI() {
       buildAdvancedOptions();
       const missing = renderModelInfo();
       if (missing.length) {
-        notes.push("Configured model file(s) not present on the server:\n" + missing.join("\n"));
+        notes.push(CONFIG.MODELS[state.model].label + " is not fully installed on the server:\n" + missing.join("\n"));
       }
     }
     if (notes.length) showError(notes.join("\n\n"));

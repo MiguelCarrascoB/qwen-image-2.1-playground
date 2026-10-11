@@ -18,7 +18,7 @@
 
   <title>Qwen-Image-2.1 — ComfyUI Playground</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="styles.css?v=4">
+  <link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body>
 
@@ -73,6 +73,10 @@
         <button class="mode-btn" id="modeEdit" type="button" role="tab"
                 aria-selected="false" aria-controls="editFields">Edit image</button>
       </div>
+
+      <label for="model">Model</label>
+      <select id="model" aria-describedby="modelHint"></select>
+      <div class="hint" id="modelHint" aria-live="polite"></div>
 
       <div id="t2iFields" role="tabpanel" aria-labelledby="modeT2i">
         <label for="prompt">Prompt</label>
@@ -234,6 +238,6 @@
 
   </div>
 
-  <script type="module" src="js/main.js?v=4"></script>
+  <script type="module" src="js/main.js?v=5"></script>
 </body>
 </html>
