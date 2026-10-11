@@ -57,8 +57,13 @@ function Fetch([string]$RepoId, [string]$Path, [string]$DestDir) {
   if (Test-Path $dest) { Write-Host "have $dest"; return }
   New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
   Write-Host "downloading $RepoId/$Path"
+  # Windows PowerShell 5.1 turns curl's stderr progress meter into a terminating
+  # error under -ErrorAction Stop, so relax it for the native call only.
+  $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
   curl.exe -fL --retry 5 -C - -o "$dest.part" "$Hf/$RepoId/resolve/main/$Path"
-  if ($LASTEXITCODE -ne 0) { throw "download failed: $RepoId/$Path (re-run to resume, or add -Mirror)" }
+  $code = $LASTEXITCODE
+  $ErrorActionPreference = $prev
+  if ($code -ne 0) { throw "download failed: $RepoId/$Path (re-run to resume, or add -Mirror)" }
   Move-Item -Force "$dest.part" $dest
 }
 
@@ -76,11 +81,15 @@ if ($Uncensored) {
   } else {
     $dl = Join-Path $Repo "downloads"
     Fetch "AtomicChat/Qwen-Image-2.1-Turbo-Uncensored-GGUF" "Qwen-Image-2.1-Turbo-Abliterated-Uncensored-Q8_0.gguf" $dl
+    # Same PS 5.1 stderr quirk as the downloads: torch/ROCm warnings must not abort.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     & $Py "$Repo\scripts\build_uncensored_encoder.py" `
       --gguf "$dl\Qwen-Image-2.1-Turbo-Abliterated-Uncensored-Q8_0.gguf" `
       --vision "$ModelsDir\text_encoders\qwen3vl_8b_w4a8.safetensors" `
-      --out $out
-    if ($LASTEXITCODE -ne 0) { throw "encoder conversion failed" }
+      --out $out 2>&1 | ForEach-Object { "$_" }
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    if ($code -ne 0) { throw "encoder conversion failed" }
     Write-Host "Built $out -- you can delete $dl now."
   }
 }
@@ -88,5 +97,5 @@ if ($Uncensored) {
 Write-Host ""
 Write-Host "Done. Start ComfyUI:"
 Write-Host "  cd $ComfyDir"
-Write-Host "  $Py main.py --port 8188 --use-pytorch-cross-attention --enable-cors-header http://127.0.0.1:8080"
+Write-Host "  $Py main.py --port 8188 --use-pytorch-cross-attention --highvram --enable-cors-header http://127.0.0.1:8080"
 Write-Host "then: python scripts\serve_app.py  and open http://127.0.0.1:8080, pick a model."

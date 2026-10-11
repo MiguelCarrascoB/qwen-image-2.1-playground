@@ -116,6 +116,12 @@ export const CONFIG = {
   SAMPLER_SELECT_TYPE: "KSamplerSelect",
   SAMPLER_CUSTOM_TYPE: "SamplerCustom",
 
+  // --- Memory ---------------------------------------------------------------
+  // Start ComfyUI with --highvram so it keeps models in GPU memory after a job.
+  // The playground then asks it to unload models and free VRAM once it has been
+  // idle this many minutes (0 disables). Only runs while the tab is open.
+  IDLE_UNLOAD_MINUTES: 5,
+
   // --- Sampler defaults (UI can override) ----------------------------------
   SAMPLER_NAME: "euler",
   SCHEDULER:    "simple",

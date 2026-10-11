@@ -12,6 +12,7 @@ import {
   conn, onConnectionChange, checkConnection, reconnectNow, onWsMessage,
   buildGraph, buildEditGraph, submitPrompt, uploadImage, imageRef,
   interrupt, cancelQueued, fetchHistoryImages,
+  scheduleIdleUnload, cancelIdleUnload,
   fetchSystemStats, fetchQueue, viewUrl, previewUrl,
   downloadImage, serverBase, resolveModel,
 } from "./api.js?v=5";
@@ -311,7 +312,10 @@ function setControlsDisabled(disabled) {
 
 function setGenerating(on) {
   state.generating = on;
-  if (on) clearServerBusy();
+  if (on) {
+    clearServerBusy();
+    cancelIdleUnload();
+  }
   $("cancelBtn").classList.toggle("visible", on);
   $("cancelBtn").disabled = false;
   $("cancelBtn").textContent = "Cancel";
@@ -489,6 +493,7 @@ function finishGeneration() {
   setProgress(100);
   setGenerating(false);
   state.currentPromptId = null;
+  scheduleIdleUnload();
 }
 
 /* ============================================================================
@@ -954,6 +959,7 @@ async function generate() {
     showError("Failed to submit workflow:\n" + (e.message || e));
     setGenerating(false);
     stopElapsedTimer();
+    scheduleIdleUnload();
   }
 }
 

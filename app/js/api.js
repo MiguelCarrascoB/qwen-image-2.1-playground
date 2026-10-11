@@ -428,6 +428,50 @@ export async function interrupt(promptId) {
   }
 }
 
+/** Ask the server to unload its models and free VRAM (applied between jobs). */
+export async function freeModels() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    await fetch(serverBase + "/free", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ unload_models: true, free_memory: true }),
+      signal: ctrl.signal,
+    });
+  } catch { /* best-effort */ } finally {
+    clearTimeout(timer);
+  }
+}
+
+let idleTimer = null;
+
+/** A new job is starting: keep the models loaded. */
+export function cancelIdleUnload() {
+  clearTimeout(idleTimer);
+  idleTimer = null;
+}
+
+/** A job just ended: unload the models after CONFIG.IDLE_UNLOAD_MINUTES of
+ * inactivity. If the server is busy when the timer fires (another client's
+ * job), wait another full period instead. */
+export function scheduleIdleUnload() {
+  cancelIdleUnload();
+  const ms = CONFIG.IDLE_UNLOAD_MINUTES * 60 * 1000;
+  if (!(ms > 0)) return;
+  idleTimer = setTimeout(async () => {
+    idleTimer = null;
+    try {
+      const q = await fetchQueue();
+      if ((q.queue_running || []).length || (q.queue_pending || []).length) {
+        scheduleIdleUnload();
+        return;
+      }
+      await freeModels();
+    } catch { /* server unreachable: nothing to free */ }
+  }, ms);
+}
+
 /** Remove a queued (not-yet-running) job by prompt id. */
 export async function cancelQueued(promptId) {
   if (!promptId) return;

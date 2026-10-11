@@ -51,7 +51,7 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 :: Launch (CORS is required by the web UI, which is served from a different
 :: local origin; scope it to that origin -- not the bare flag, which opens CORS
 :: to every website. Use :8137 if you serve the UI with --port 8137.)
-python main.py --port 8188 --use-pytorch-cross-attention --enable-cors-header http://127.0.0.1:8080
+python main.py --port 8188 --use-pytorch-cross-attention --highvram --enable-cors-header http://127.0.0.1:8080
 ```
 
 Then serve `app/` over http (`python scripts\serve_app.py`) and open
@@ -103,7 +103,7 @@ First verified real GPU generation on Windows + ROCm:
 - **Result** — total wall time **18.1 s** on the first (cold) run, including
   ~14 s of one-time model loading; steady-state sampler ~**0.6 s/step** at
   512×512. No errors. Output `qwen21_00001_.png`.
-- **Launch** — `python main.py --port 8188 --enable-cors-header http://127.0.0.1:8080 --use-pytorch-cross-attention`.
+- **Launch** — `python main.py --port 8188 --enable-cors-header http://127.0.0.1:8080 --use-pytorch-cross-attention --highvram` (`--highvram` stops ComfyUI from unloading models after every job; the playground frees them after 5 idle minutes).
 
 ## Why not ZLUDA / DirectML (2026 status)
 
