@@ -109,15 +109,39 @@ TURBO_QUANT=Q8_0 ./scripts/setup_mac.sh
 | M4 Pro 48 GB | ~15 GB | ~27 GB unified memory; close other heavy apps |
 
 Then start ComfyUI as usual. On Windows:
-`python main.py --port 8188 --use-pytorch-cross-attention --enable-cors-header http://127.0.0.1:8080`.
+`python main.py --port 8188 --use-pytorch-cross-attention --highvram --enable-cors-header http://127.0.0.1:8080`.
+`--highvram` keeps the models in GPU memory between jobs. The playground frees
+them after 5 idle minutes (`IDLE_UNLOAD_MINUTES` in `app/js/config.js`).
 On the Mac: `./scripts/start_comfyui_mac.sh`. Serve the UI with
 `python scripts/serve_app.py`, open `http://127.0.0.1:8080`, and pick the
 model.
 
 ## Verification status
 
-**Not yet run on GPU hardware.** This was set up from a GPU-less dev box. What
-was checked:
+**Run on an RX 7900 XTX (24 GB, ROCm 7.2.1, ComfyUI 0.37.0) on 2026-10-11.**
+Same prompts, seed 42, 1024², euler, CFG 1, graphs mirroring `app/js/api.js`:
+
+| Config | Cold | Warm (3 prompts) |
+|---|---|---|
+| Base `Q4_K_M`, 40 steps | 81 s | 68-69 s |
+| Base `Q4_K_M`, 8 steps (no distillation) | 15 s | 15 s |
+| **Turbo `Q8_0`, 8 steps** | 19 s | 13 s |
+| Turbo `Q8_0` + uncensored encoder | 338 s | 283-300 s |
+
+- Turbo matches the 40-step base closely at about a fifth of the time. Its
+  portrait skin comes out smoother and less weathered than the base's.
+- The base model at 8 steps is visibly soft and washed out, which confirms
+  that Turbo needs its own schedule.
+- The uncensored encoder gives images very close to plain Turbo, as its model
+  card says, but the 17.5 GB encoder overflows VRAM and every run takes ~5 min.
+- The images are in [`docs/images/turbo_comparison.jpg`](images/turbo_comparison.jpg).
+- With ComfyUI launched with `--highvram`, one uncensored run took 140 s
+  (vs 283-338 s without it), and a Turbo run right after it worked without
+  running out of memory. That is a single measurement, not a benchmark.
+- Not yet run: edit mode on the Turbo presets, and the browser UI against
+  real Turbo output (the benchmark posts the same graphs straight to ComfyUI).
+
+Checks made earlier from a GPU-less dev box:
 
 - **Graphs:** all six graphs (3 presets × text→image / edit), built by the
   app's own `api.js`, were accepted by ComfyUI's `/prompt` validation
@@ -146,8 +170,6 @@ was checked:
     | Vision tower, norms | 1.0 | 0 (bit-exact) | copied unchanged |
     | Untouched weights (`q_proj`, `k_proj`, `gate_proj`) | 0.99998 | ~0.002 | Q8_0 rounding |
     | Residual writers (`o_proj`, `down_proj`) | 0.9999 | up to 0.024 | the abliteration edit |
-- **Not checked:** actual image quality and speed. The dev box has no GPU and
-  11 GB of RAM, so the full 17.5 GB encoder couldn't be loaded there.
 
 ### Smoke test (per machine)
 
